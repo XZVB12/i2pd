@@ -28,7 +28,6 @@ SOURCES += DaemonQT.cpp mainwindow.cpp \
     ../../libi2pd/Datagram.cpp \
     ../../libi2pd/Destination.cpp \
     ../../libi2pd/Ed25519.cpp \
-    ../../libi2pd/Event.cpp \
     ../../libi2pd/Family.cpp \
     ../../libi2pd/FS.cpp \
     ../../libi2pd/Garlic.cpp \
@@ -74,8 +73,6 @@ SOURCES += DaemonQT.cpp mainwindow.cpp \
     ../../libi2pd_client/MatchedDestination.cpp \
     ../../libi2pd_client/SAM.cpp \
     ../../libi2pd_client/SOCKS.cpp \
-    ../../libi2pd_client/Websocket.cpp \
-    ../../libi2pd_client/WebSocks.cpp \
     ../../daemon/Daemon.cpp \
     ../../daemon/HTTPServer.cpp \
     ../../daemon/I2PControl.cpp \
@@ -111,7 +108,6 @@ HEADERS  += DaemonQT.h mainwindow.h \
     ../../libi2pd/Datagram.h \
     ../../libi2pd/Destination.h \
     ../../libi2pd/Ed25519.h \
-    ../../libi2pd/Event.h \
     ../../libi2pd/Family.h \
     ../../libi2pd/FS.h \
     ../../libi2pd/Garlic.h \
@@ -165,8 +161,6 @@ HEADERS  += DaemonQT.h mainwindow.h \
     ../../libi2pd_client/MatchedDestination.h \
     ../../libi2pd_client/SAM.h \
     ../../libi2pd_client/SOCKS.h \
-    ../../libi2pd_client/Websocket.h \
-    ../../libi2pd_client/WebSocks.h \
     ../../daemon/Daemon.h \
     ../../daemon/HTTPServer.h \
     ../../daemon/I2PControl.h \

@@ -7,6 +7,7 @@
 #include <memory>
 #include <atomic>
 #include <vector>
+#include <mutex>
 #include "Base.h"
 #include "Signature.h"
 #include "CryptoKey.h"
@@ -55,7 +56,7 @@ namespace data
 
 	const uint16_t CRYPTO_KEY_TYPE_ELGAMAL = 0;
 	const uint16_t CRYPTO_KEY_TYPE_ECIES_P256_SHA256_AES256CBC = 1;
-	const uint16_t CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RARCHET = 4; 	
+	const uint16_t CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET = 4; 	
 	const uint16_t CRYPTO_KEY_TYPE_ECIES_P256_SHA256_AES256CBC_TEST = 65280; // TODO: remove later
 	const uint16_t CRYPTO_KEY_TYPE_ECIES_GOSTR3410_CRYPTO_PRO_A_SHA256_AES256CBC = 65281; // TODO: use GOST R 34.11 instead SHA256 and GOST 28147-89 instead AES
 
@@ -125,8 +126,8 @@ namespace data
 
 			Identity m_StandardIdentity;
 			IdentHash m_IdentHash;
-			mutable std::unique_ptr<i2p::crypto::Verifier> m_Verifier;
-			mutable std::atomic_bool m_IsVerifierCreated; // make sure we don't create twice
+			mutable i2p::crypto::Verifier * m_Verifier = nullptr;
+			mutable std::mutex m_VerifierMutex;
 			size_t m_ExtendedLen;
 			uint8_t * m_ExtendedBuffer;
 	};
@@ -224,12 +225,12 @@ namespace data
 		public:
 
 			virtual ~LocalDestination() {};
-			virtual bool Decrypt (const uint8_t * encrypted, uint8_t * data, BN_CTX * ctx) const = 0;
+			virtual bool Decrypt (const uint8_t * encrypted, uint8_t * data, BN_CTX * ctx, CryptoKeyType preferredCrypto = CRYPTO_KEY_TYPE_ELGAMAL) const = 0;
 			virtual std::shared_ptr<const IdentityEx> GetIdentity () const = 0;
 
 			const IdentHash& GetIdentHash () const { return GetIdentity ()->GetIdentHash (); };
-			virtual CryptoKeyType GetEncryptionType () const { return GetIdentity ()->GetCryptoKeyType (); }; // override for LeaseSet
-			virtual const uint8_t * GetEncryptionPublicKey () const { return GetIdentity ()->GetEncryptionPublicKey (); }; // override for LeaseSet
+			virtual bool SupportsEncryptionType (CryptoKeyType keyType) const { return GetIdentity ()->GetCryptoKeyType () == keyType; }; // override for LeaseSet
+			virtual const uint8_t * GetEncryptionPublicKey (CryptoKeyType keyType) const { return GetIdentity ()->GetEncryptionPublicKey (); }; // override for LeaseSet
 	};
 }
 }

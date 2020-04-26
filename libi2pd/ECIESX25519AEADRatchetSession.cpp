@@ -20,7 +20,7 @@ namespace garlic
         // DH_INITIALIZE(rootKey, k)
         uint8_t keydata[64];
         i2p::crypto::HKDF (rootKey, k, 32, "KDFDHRatchetStep", keydata); // keydata = HKDF(rootKey, k, "KDFDHRatchetStep", 64)
-        // nextRootKey = keydata[0:31]
+        memcpy (m_NextRootKey, keydata, 32); // nextRootKey = keydata[0:31]
         i2p::crypto::HKDF (keydata + 32, nullptr, 0, "TagAndKeyGenKeys", m_KeyData.buf); 
         // [sessTag_ck, symmKey_ck] = HKDF(keydata[32:63], ZEROLEN, "TagAndKeyGenKeys", 64) 
 		memcpy (m_SymmKeyCK, m_KeyData.buf + 32, 32);
@@ -38,35 +38,45 @@ namespace garlic
     {
         i2p::crypto::HKDF (m_KeyData.GetSessTagCK (), m_SessTagConstant, 32, "SessionTagKeyGen", m_KeyData.buf); // [sessTag_ck, tag] = HKDF(sessTag_chainkey, SESSTAG_CONSTANT, "SessionTagKeyGen", 64)
 		m_NextIndex++;	
+		if (m_NextIndex >= 65535) m_NextIndex = 0; // TODO: dirty hack, should create new tagset
         return m_KeyData.GetTag ();
     }
 
 	void RatchetTagSet::GetSymmKey (int index, uint8_t * key)
 	{
-		if (m_NextSymmKeyIndex > 0 && index >= m_NextSymmKeyIndex)
+		if (index >= m_NextSymmKeyIndex)
 		{	
 			auto num = index + 1 - m_NextSymmKeyIndex;
+			if (!m_NextSymmKeyIndex)
+			{
+				i2p::crypto::HKDF (m_SymmKeyCK, nullptr, 0, "SymmetricRatchet", m_CurrentSymmKeyCK); // keydata_0 = HKDF(symmKey_ck, SYMMKEY_CONSTANT, "SymmetricRatchet", 64)
+				m_NextSymmKeyIndex = 1;
+				num--;
+			}	
 			for (int i = 0; i < num; i++)
+			{	
 				i2p::crypto::HKDF (m_CurrentSymmKeyCK, nullptr, 0, "SymmetricRatchet", m_CurrentSymmKeyCK);
+				if (i < num - 1)
+					m_ItermediateSymmKeys.emplace (m_NextSymmKeyIndex + i, m_CurrentSymmKeyCK + 32);
+			}	
 			m_NextSymmKeyIndex += num;
 			memcpy (key, m_CurrentSymmKeyCK + 32, 32);
 		}
 		else
-			CalculateSymmKeyCK (index, key);			
+		{
+			auto it = m_ItermediateSymmKeys.find (index);
+			if (it != m_ItermediateSymmKeys.end ())
+			{	
+				memcpy (key, it->second, 32);
+				m_ItermediateSymmKeys.erase (it);
+			}	
+			else
+				LogPrint (eLogError, "Garlic: Missing symmetric key for index ", index);
+		}	
 	}	
-
-	void RatchetTagSet::CalculateSymmKeyCK (int index, uint8_t * key)
-	{
-		// TODO: store intermediate keys	
-		uint8_t currentSymmKeyCK[64];
-		i2p::crypto::HKDF (m_SymmKeyCK, nullptr, 0, "SymmetricRatchet", currentSymmKeyCK); // keydata_0 = HKDF(symmKey_ck, SYMMKEY_CONSTANT, "SymmetricRatchet", 64)
-		for (int i = 0; i < index; i++)
-			i2p::crypto::HKDF (currentSymmKeyCK, nullptr, 0, "SymmetricRatchet", currentSymmKeyCK); // keydata_n = HKDF(symmKey_chainKey_(n-1), SYMMKEY_CONSTANT, "SymmetricRatchet", 64)
-		memcpy (key, currentSymmKeyCK + 32, 32);
-	}
 	
-    ECIESX25519AEADRatchetSession::ECIESX25519AEADRatchetSession (GarlicDestination * owner):
-        GarlicRoutingSession (owner, true)
+    ECIESX25519AEADRatchetSession::ECIESX25519AEADRatchetSession (GarlicDestination * owner, bool attachLeaseSet):
+        GarlicRoutingSession (owner, attachLeaseSet)
     {
     	ResetKeys ();
     }
@@ -110,15 +120,15 @@ namespace garlic
         return false;
     }
 
-    uint64_t ECIESX25519AEADRatchetSession::CreateNewSessionTag () const
+    std::shared_ptr<RatchetTagSet> ECIESX25519AEADRatchetSession::CreateNewSessionTagset ()
     {
         uint8_t tagsetKey[32];    
         i2p::crypto::HKDF (m_CK, nullptr, 0, "SessionReplyTags", tagsetKey, 32); // tagsetKey = HKDF(chainKey, ZEROLEN, "SessionReplyTags", 32)
          // Session Tag Ratchet
-        RatchetTagSet tagsetNsr;
-        tagsetNsr.DHInitialize (m_CK, tagsetKey); // tagset_nsr = DH_INITIALIZE(chainKey, tagsetKey)
-        tagsetNsr.NextSessionTagRatchet ();
-        return tagsetNsr.GetNextSessionTag ();   
+        auto tagsetNsr = std::make_shared<RatchetTagSet>(shared_from_this ());
+        tagsetNsr->DHInitialize (m_CK, tagsetKey); // tagset_nsr = DH_INITIALIZE(chainKey, tagsetKey)
+        tagsetNsr->NextSessionTagRatchet ();
+        return tagsetNsr;   
     }
 
     bool ECIESX25519AEADRatchetSession::HandleNewIncomingSession (const uint8_t * buf, size_t len)
@@ -126,7 +136,7 @@ namespace garlic
         if (!GetOwner ()) return false;
         // we are Bob
         // KDF1
-        MixHash (GetOwner ()->GetEncryptionPublicKey (), 32); // h = SHA256(h || bpk)    
+        MixHash (GetOwner ()->GetEncryptionPublicKey (i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET), 32); // h = SHA256(h || bpk)    
 		
 		if (!i2p::crypto::GetElligator ()->Decode (buf, m_Aepk))
 		{ 
@@ -137,7 +147,7 @@ namespace garlic
         MixHash (m_Aepk, 32); // h = SHA256(h || aepk)  
     
         uint8_t sharedSecret[32];
-		GetOwner ()->Decrypt (m_Aepk, sharedSecret, nullptr); // x25519(bsk, aepk)
+		GetOwner ()->Decrypt (m_Aepk, sharedSecret, nullptr, i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET); // x25519(bsk, aepk)
 		i2p::crypto::HKDF (m_CK, sharedSecret, 32, "", m_CK); // [chainKey, key] = HKDF(chainKey, sharedSecret, "", 64)
 		
         // decrypt flags/static    
@@ -159,7 +169,7 @@ namespace garlic
 		{
 			// static key, fs is apk
             memcpy (m_RemoteStaticKey, fs, 32);
-			GetOwner ()->Decrypt (fs, sharedSecret, nullptr); // x25519(bsk, apk)
+			GetOwner ()->Decrypt (fs, sharedSecret, nullptr, i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET); // x25519(bsk, apk)
 			i2p::crypto::HKDF (m_CK, sharedSecret, 32, "", m_CK); // [chainKey, key] = HKDF(chainKey, sharedSecret, "", 64)
 		}
 		else // all zeros flags
@@ -173,12 +183,12 @@ namespace garlic
         m_State = eSessionStateNewSessionReceived;            
 		GetOwner ()->AddECIESx25519Session (m_RemoteStaticKey, shared_from_this ());
 
-        HandlePayload (payload.data (), len - 16);    
+        HandlePayload (payload.data (), len - 16, nullptr, 0);    
 
         return true;
     }
 
-    void ECIESX25519AEADRatchetSession::HandlePayload (const uint8_t * buf, size_t len)
+    void ECIESX25519AEADRatchetSession::HandlePayload (const uint8_t * buf, size_t len, const std::shared_ptr<RatchetTagSet>& receiveTagset, int index)
     {
         size_t offset = 0;
 		while (offset < len)
@@ -207,6 +217,28 @@ namespace garlic
 				case eECIESx25519BlkPadding:
 					LogPrint (eLogDebug, "Garlic: padding");
 				break;
+				case eECIESx25519BlkNextKey:
+					LogPrint (eLogDebug, "Garlic: next key");	
+					HandleNextKey (buf + offset, size, receiveTagset);
+				break;
+				case eECIESx25519BlkAck:
+				{	
+					LogPrint (eLogDebug, "Garlic: ack");
+					int numAcks = size >> 2; // /4
+					auto offset1 = offset;	
+					for (auto i = 0; i < numAcks; i++)
+					{	
+						offset1 += 2; // tagsetid
+						MessageConfirmed (bufbe16toh (buf + offset1)); offset1 += 2; // N
+					}
+					break;
+				}		
+				case eECIESx25519BlkAckRequest:
+				{	
+					LogPrint (eLogDebug, "Garlic: ack request");
+					m_AckRequests.push_back ({receiveTagset->GetTagSetID (), index});		
+					break;	
+				}	
 				default:
 					LogPrint (eLogWarning, "Garlic: Unknown block type ", (int)blk);
 			}
@@ -214,6 +246,53 @@ namespace garlic
 		}
     }    
 
+	void ECIESX25519AEADRatchetSession::HandleNextKey (const uint8_t * buf, size_t len, const std::shared_ptr<RatchetTagSet>& receiveTagset)
+	{
+		uint8_t flag = buf[0]; buf++; // flag
+		if (flag & ECIESX25519_NEXT_KEY_REVERSE_KEY_FLAG)
+		{
+			// TODO: implement
+		}	
+		else
+		{
+			uint16_t keyID = bufbe16toh (buf); buf += 2; // keyID
+			bool newKey = flag & ECIESX25519_NEXT_KEY_REQUEST_REVERSE_KEY_FLAG;
+			m_SendReverseKey = true;
+			if (!m_NextReceiveRatchet)
+				m_NextReceiveRatchet.reset (new DHRatchet ());
+			else
+			{	
+				if (keyID == m_NextReceiveRatchet->keyID && newKey == m_NextReceiveRatchet->newKey) 
+				{
+					LogPrint (eLogDebug, "Garlic: Duplicate ", newKey ? "new" : "old", " key ", keyID, " received");
+					return;
+				}	
+				m_NextReceiveRatchet->keyID = keyID;
+			}
+			int tagsetID = 2*keyID;
+			if (newKey)
+			{	
+				m_NextReceiveRatchet->key.GenerateKeys ();
+				m_NextReceiveRatchet->newKey = true;
+				tagsetID++;
+			}	
+			else
+				m_NextReceiveRatchet->newKey = false;
+			if (flag & ECIESX25519_NEXT_KEY_KEY_PRESENT_FLAG)
+				memcpy (m_NextReceiveRatchet->remote, buf, 32);
+			
+			uint8_t sharedSecret[32], tagsetKey[32];
+			m_NextReceiveRatchet->key.Agree (m_NextReceiveRatchet->remote, sharedSecret);
+			i2p::crypto::HKDF (sharedSecret, nullptr, 0, "XDHRatchetTagSet", tagsetKey, 32); // tagsetKey = HKDF(sharedSecret, ZEROLEN, "XDHRatchetTagSet", 32)
+			auto newTagset = std::make_shared<RatchetTagSet>(shared_from_this ());	
+			newTagset->SetTagSetID (tagsetID); 
+			newTagset->DHInitialize (receiveTagset->GetNextRootKey (), tagsetKey); 
+			newTagset->NextSessionTagRatchet ();
+			GenerateMoreReceiveTags (newTagset, GetOwner ()->GetNumTags ());		
+			LogPrint (eLogDebug, "Garlic: next receive tagset ", tagsetID, " created");
+		}	
+	}	
+		
     bool ECIESX25519AEADRatchetSession::NewOutgoingSessionMessage (const uint8_t * payload, size_t len, uint8_t * out, size_t outLen)
     { 
 		ResetKeys ();
@@ -235,7 +314,7 @@ namespace garlic
         // encrypt static key section
         uint8_t nonce[12];
 		CreateNonce (0, nonce);
-		if (!i2p::crypto::AEADChaCha20Poly1305 (GetOwner ()->GetEncryptionPublicKey (), 32, m_H, 32, m_CK + 32, nonce, out + offset, 48, true)) // encrypt
+		if (!i2p::crypto::AEADChaCha20Poly1305 (GetOwner ()->GetEncryptionPublicKey (i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET), 32, m_H, 32, m_CK + 32, nonce, out + offset, 48, true)) // encrypt
 		{
 			LogPrint (eLogWarning, "Garlic: Static section AEAD encryption failed ");
 			return false;
@@ -243,7 +322,7 @@ namespace garlic
         MixHash (out + offset, 48); // h = SHA256(h || ciphertext)
         offset += 48;
         // KDF2 
-        GetOwner ()->Decrypt (m_RemoteStaticKey, sharedSecret, nullptr); // x25519 (ask, bpk)
+        GetOwner ()->Decrypt (m_RemoteStaticKey, sharedSecret, nullptr, i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET); // x25519 (ask, bpk)
 		i2p::crypto::HKDF (m_CK, sharedSecret, 32, "", m_CK); // [chainKey, key] = HKDF(chainKey, sharedSecret, "", 64)
 		// encrypt payload
 		if (!i2p::crypto::AEADChaCha20Poly1305 (payload, len, m_H, 32, m_CK + 32, nonce, out + offset, len + 16, true)) // encrypt
@@ -255,7 +334,7 @@ namespace garlic
 
 		m_State = eSessionStateNewSessionSent;
         if (GetOwner ())
-            GetOwner ()->AddECIESx25519SessionTag (0, CreateNewSessionTag (), shared_from_this ());   		
+            GetOwner ()->AddECIESx25519SessionNextTag (CreateNewSessionTagset ());   		
 
         return true;
     }
@@ -263,7 +342,7 @@ namespace garlic
     bool ECIESX25519AEADRatchetSession::NewSessionReplyMessage (const uint8_t * payload, size_t len, uint8_t * out, size_t outLen)
     {
         // we are Bob
-        uint64_t tag = CreateNewSessionTag ();   
+        uint64_t tag = CreateNewSessionTagset ()->GetNextSessionTag ();   
     
         size_t offset = 0;
         memcpy (out + offset, &tag, 8);
@@ -291,28 +370,46 @@ namespace garlic
 			return false;
 		}
         MixHash (out + offset, 16); // h = SHA256(h || ciphertext)    
-        out += 16;
+        offset += 16;
+		memcpy (m_NSRHeader, out, 56); // for possible next NSR
         // KDF for payload
         uint8_t keydata[64];
         i2p::crypto::HKDF (m_CK, nullptr, 0, "", keydata); // keydata = HKDF(chainKey, ZEROLEN, "", 64)
 		// k_ab = keydata[0:31], k_ba = keydata[32:63]
-        m_ReceiveTagset.DHInitialize (m_CK, keydata); // tagset_ab = DH_INITIALIZE(chainKey, k_ab)
-		m_ReceiveTagset.NextSessionTagRatchet ();
-        m_SendTagset.DHInitialize (m_CK, keydata + 32); // tagset_ba = DH_INITIALIZE(chainKey, k_ba)
-		m_SendTagset.NextSessionTagRatchet ();	
-		GenerateMoreReceiveTags (GetOwner ()->GetNumTags ());
-        i2p::crypto::HKDF (keydata + 32, nullptr, 0, "AttachPayloadKDF", keydata, 32); // k = HKDF(k_ba, ZEROLEN, "AttachPayloadKDF", 32)
+		auto receiveTagset = std::make_shared<RatchetTagSet>(shared_from_this ());
+        receiveTagset->DHInitialize (m_CK, keydata); // tagset_ab = DH_INITIALIZE(chainKey, k_ab)
+		receiveTagset->NextSessionTagRatchet ();
+		m_SendTagset = std::make_shared<RatchetTagSet>(shared_from_this ());
+        m_SendTagset->DHInitialize (m_CK, keydata + 32); // tagset_ba = DH_INITIALIZE(chainKey, k_ba)
+		m_SendTagset->NextSessionTagRatchet ();	
+		GenerateMoreReceiveTags (receiveTagset, GetOwner ()->GetNumTags ());
+        i2p::crypto::HKDF (keydata + 32, nullptr, 0, "AttachPayloadKDF", m_NSRKey, 32); // k = HKDF(k_ba, ZEROLEN, "AttachPayloadKDF", 32)
         // encrypt payload
-        if (!i2p::crypto::AEADChaCha20Poly1305 (payload, len, m_H, 32, keydata, nonce, out + offset, len + 16, true)) // encrypt
+        if (!i2p::crypto::AEADChaCha20Poly1305 (payload, len, m_H, 32, m_NSRKey, nonce, out + offset, len + 16, true)) // encrypt
 		{
-			LogPrint (eLogWarning, "Garlic: Payload section AEAD encryption failed");
+			LogPrint (eLogWarning, "Garlic: NSR payload section AEAD encryption failed");
 			return false;
 		}
-		m_State = eSessionStateEstablished;
+		m_State = eSessionStateNewSessionReplySent;
 		
         return true;
     }
 
+	bool ECIESX25519AEADRatchetSession::NextNewSessionReplyMessage (const uint8_t * payload, size_t len, uint8_t * out, size_t outLen)
+    {
+        // we are Bob and sent NSR already
+		memcpy (out, m_NSRHeader, 56);
+		uint8_t nonce[12];
+		CreateNonce (0, nonce);
+		// encrypt payload
+        if (!i2p::crypto::AEADChaCha20Poly1305 (payload, len, m_H, 32, m_NSRKey, nonce, out + 56, len + 16, true)) // encrypt
+		{
+			LogPrint (eLogWarning, "Garlic: Next NSR payload section AEAD encryption failed");
+			return false;
+		}
+		return true;
+	}	
+		
     bool ECIESX25519AEADRatchetSession::HandleNewOutgoingSessionReply (const uint8_t * buf, size_t len)
     {
 		// we are Alice
@@ -332,7 +429,7 @@ namespace garlic
 		uint8_t sharedSecret[32];      
         m_EphemeralKeys.Agree (bepk, sharedSecret); // sharedSecret = x25519(aesk, bepk)  
 		i2p::crypto::HKDF (m_CK, sharedSecret, 32, "", m_CK, 32); // chainKey = HKDF(chainKey, sharedSecret, "", 32) 
-		GetOwner ()->Decrypt (bepk, sharedSecret, nullptr); // x25519 (ask, bepk)
+		GetOwner ()->Decrypt (bepk, sharedSecret, nullptr, i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET); // x25519 (ask, bepk)
 		i2p::crypto::HKDF (m_CK, sharedSecret, 32, "", m_CK); // [chainKey, key] = HKDF(chainKey, sharedSecret, "", 64)
 		uint8_t nonce[12];
 		CreateNonce (0, nonce);
@@ -348,11 +445,13 @@ namespace garlic
         uint8_t keydata[64];
         i2p::crypto::HKDF (m_CK, nullptr, 0, "", keydata); // keydata = HKDF(chainKey, ZEROLEN, "", 64)
         // k_ab = keydata[0:31], k_ba = keydata[32:63]
-        m_SendTagset.DHInitialize (m_CK, keydata); // tagset_ab = DH_INITIALIZE(chainKey, k_ab)
-		m_SendTagset.NextSessionTagRatchet ();
-        m_ReceiveTagset.DHInitialize (m_CK, keydata + 32); // tagset_ba = DH_INITIALIZE(chainKey, k_ba)
-		m_ReceiveTagset.NextSessionTagRatchet ();
-		GenerateMoreReceiveTags (GetOwner ()->GetNumTags ());
+		m_SendTagset = std::make_shared<RatchetTagSet>(shared_from_this ());
+        m_SendTagset->DHInitialize (m_CK, keydata); // tagset_ab = DH_INITIALIZE(chainKey, k_ab)
+		m_SendTagset->NextSessionTagRatchet ();
+		auto receiveTagset = std::make_shared<RatchetTagSet>(shared_from_this ());
+        receiveTagset->DHInitialize (m_CK, keydata + 32); // tagset_ba = DH_INITIALIZE(chainKey, k_ba)
+		receiveTagset->NextSessionTagRatchet ();
+		GenerateMoreReceiveTags (receiveTagset, GetOwner ()->GetNumTags ());
         i2p::crypto::HKDF (keydata + 32, nullptr, 0, "AttachPayloadKDF", keydata, 32); // k = HKDF(k_ba, ZEROLEN, "AttachPayloadKDF", 32)		
 		// decrypt payload
 		std::vector<uint8_t> payload (len - 16);
@@ -364,22 +463,26 @@ namespace garlic
 	
 		m_State = eSessionStateEstablished;
 		GetOwner ()->AddECIESx25519Session (m_RemoteStaticKey, shared_from_this ());
-		HandlePayload (payload.data (), len - 16); 
+		HandlePayload (payload.data (), len - 16, nullptr, 0); 
 
+		// we have received reply to NS with LeaseSet in it
+		SetLeaseSetUpdateStatus (eLeaseSetUpToDate);
+		SetLeaseSetUpdateMsgID (0);
+		
         return true;
     }
 
 	bool ECIESX25519AEADRatchetSession::NewExistingSessionMessage (const uint8_t * payload, size_t len, uint8_t * out, size_t outLen)
 	{
 		uint8_t nonce[12];
-		auto index = m_SendTagset.GetNextIndex ();
+		auto index = m_SendTagset->GetNextIndex ();
 		CreateNonce (index, nonce); // tag's index
-		uint64_t tag = m_SendTagset.GetNextSessionTag ();
+		uint64_t tag = m_SendTagset->GetNextSessionTag ();
 		memcpy (out, &tag, 8);
 		// ad = The session tag, 8 bytes
 		// ciphertext = ENCRYPT(k, n, payload, ad)
 		uint8_t key[32];
-		m_SendTagset.GetSymmKey (index, key);
+		m_SendTagset->GetSymmKey (index, key);
 		if (!i2p::crypto::AEADChaCha20Poly1305 (payload, len, out, 8, key, nonce, out + 8, outLen - 8, true)) // encrypt
 		{
 			LogPrint (eLogWarning, "Garlic: Payload section AEAD encryption failed");
@@ -388,33 +491,39 @@ namespace garlic
 		return true;
 	}
 
-	bool ECIESX25519AEADRatchetSession::HandleExistingSessionMessage (const uint8_t * buf, size_t len, int index)
+	bool ECIESX25519AEADRatchetSession::HandleExistingSessionMessage (const uint8_t * buf, size_t len, 
+		std::shared_ptr<RatchetTagSet> receiveTagset, int index)
 	{
 		uint8_t nonce[12];
 		CreateNonce (index, nonce); // tag's index
 		len -= 8; // tag 
 		std::vector<uint8_t> payload (len - 16);
 		uint8_t key[32];
-		m_ReceiveTagset.GetSymmKey (index, key);
+		receiveTagset->GetSymmKey (index, key);
 		if (!i2p::crypto::AEADChaCha20Poly1305 (buf + 8, len - 16, buf, 8, key, nonce, payload.data (), len - 16, false)) // decrypt
 		{
 			LogPrint (eLogWarning, "Garlic: Payload section AEAD decryption failed");
 			return false;
 		}	
-		HandlePayload (payload.data (), len - 16); 
-		if (m_NumReceiveTags > 0)m_NumReceiveTags--;
-		if (m_NumReceiveTags <= GetOwner ()->GetNumTags ()*2/3)
-			GenerateMoreReceiveTags (GetOwner ()->GetNumTags ());		
+		HandlePayload (payload.data (), len - 16, receiveTagset, index); 
+		if (receiveTagset->GetNextIndex () - index <= GetOwner ()->GetNumTags ()*2/3)
+			GenerateMoreReceiveTags (receiveTagset, GetOwner ()->GetNumTags ());		
 		return true;
 	}
 
-	bool ECIESX25519AEADRatchetSession::HandleNextMessage (const uint8_t * buf, size_t len, int index)
+	bool ECIESX25519AEADRatchetSession::HandleNextMessage (const uint8_t * buf, size_t len, 
+		std::shared_ptr<RatchetTagSet> receiveTagset, int index)
 	{
 		m_LastActivityTimestamp = i2p::util::GetSecondsSinceEpoch ();
 		switch (m_State)
 		{
+			case eSessionStateNewSessionReplySent:
+				m_State = eSessionStateEstablished;
+#if (__cplusplus >= 201703L) // C++ 17 or higher
+				[[fallthrough]]; 
+#endif				
 			case eSessionStateEstablished:
-				return HandleExistingSessionMessage (buf, len, index);
+				return HandleExistingSessionMessage (buf, len, receiveTagset, index);
 			case eSessionStateNew:
 				return HandleNewIncomingSession (buf, len);
 			case eSessionStateNewSessionSent:
@@ -430,7 +539,7 @@ namespace garlic
         auto m = NewI2NPMessage ();
 		m->Align (12); // in order to get buf aligned to 16 (12 + 4)
 		uint8_t * buf = m->GetPayload () + 4; // 4 bytes for length
-        auto payload = CreatePayload (msg);  
+        auto payload = CreatePayload (msg, m_State != eSessionStateEstablished);  
         size_t len = payload.size ();
 
         switch (m_State)
@@ -450,6 +559,11 @@ namespace garlic
                     return nullptr;
                  len += 72;   
             break;
+			case eSessionStateNewSessionReplySent:
+				if (!NextNewSessionReplyMessage (payload.data (), payload.size (), buf, m->maxLen))
+                    return nullptr;
+                 len += 72;  
+			break;	
             default:
                 return nullptr;
         }
@@ -460,23 +574,32 @@ namespace garlic
 		return m;
     }
 
-    std::vector<uint8_t> ECIESX25519AEADRatchetSession::CreatePayload (std::shared_ptr<const I2NPMessage> msg)
+    std::vector<uint8_t> ECIESX25519AEADRatchetSession::CreatePayload (std::shared_ptr<const I2NPMessage> msg, bool first)
     {
 		uint64_t ts = i2p::util::GetMillisecondsSinceEpoch ();
-        size_t payloadLen = 7; // datatime 
+        size_t payloadLen = 0; 
+		if (first) payloadLen += 7;// datatime 
         if (msg && m_Destination) 
             payloadLen += msg->GetPayloadLength () + 13 + 32;
         auto leaseSet = (GetLeaseSetUpdateStatus () == eLeaseSetUpdated) ? CreateDatabaseStoreMsg (GetOwner ()->GetLeaseSet ()) : nullptr;
-		std::shared_ptr<I2NPMessage> deliveryStatus;
 		if (leaseSet)
 		{	
             payloadLen += leaseSet->GetPayloadLength () + 13;   
-			deliveryStatus = CreateEncryptedDeliveryStatusMsg (leaseSet->GetMsgID ());
-			payloadLen += deliveryStatus->GetPayloadLength () + 49; 
-			if (GetLeaseSetUpdateMsgID ()) GetOwner ()->RemoveDeliveryStatusSession (GetLeaseSetUpdateMsgID ()); // remove previous
-			SetLeaseSetUpdateStatus (eLeaseSetSubmitted);
-			SetLeaseSetUpdateMsgID (leaseSet->GetMsgID ());
-			SetLeaseSetSubmissionTime (ts);
+			if (!first) 
+			{
+				// ack request
+				SetLeaseSetUpdateStatus (eLeaseSetSubmitted);
+				SetLeaseSetUpdateMsgID (m_SendTagset->GetNextIndex ());
+				SetLeaseSetSubmissionTime (ts);
+				payloadLen += 4; 
+			}	
+		}	
+		if (m_AckRequests.size () > 0)
+			payloadLen += m_AckRequests.size ()*4 + 3;
+		if (m_SendReverseKey)
+		{	
+			payloadLen += 6;
+			if (m_NextReceiveRatchet->newKey) payloadLen += 32;
 		}	
         uint8_t paddingSize;
         RAND_bytes (&paddingSize, 1);
@@ -485,18 +608,60 @@ namespace garlic
         std::vector<uint8_t> v(payloadLen);
         size_t offset = 0;
         // DateTime
-        v[offset] = eECIESx25519BlkDateTime; offset++;
-        htobe16buf (v.data () + offset, 4); offset += 2; 
-        htobe32buf (v.data () + offset, ts/1000); offset += 4; // in seconds
+		if (first)
+		{	
+		    v[offset] = eECIESx25519BlkDateTime; offset++;
+		    htobe16buf (v.data () + offset, 4); offset += 2; 
+		    htobe32buf (v.data () + offset, ts/1000); offset += 4; // in seconds
+		}	
         // LeaseSet
         if (leaseSet)
+		{	
             offset += CreateGarlicClove (leaseSet, v.data () + offset, payloadLen - offset);
-		// DeliveryStatus
-		if (deliveryStatus)
-			offset += CreateDeliveryStatusClove (deliveryStatus, v.data () + offset, payloadLen - offset);
-        // msg    
+			if (!first)
+			{	
+				// ack request
+				v[offset] = eECIESx25519BlkAckRequest; offset++;
+				htobe16buf (v.data () + offset, 1); offset += 2;
+				v[offset] = 0; offset++; // flags
+			}	
+		}	
+		// msg    
         if (msg && m_Destination)    
             offset += CreateGarlicClove (msg, v.data () + offset, payloadLen - offset, true);
+		// ack
+		if (m_AckRequests.size () > 0)
+		{
+			v[offset] = eECIESx25519BlkAck; offset++;
+			htobe16buf (v.data () + offset, m_AckRequests.size ()*4); offset += 2;
+			for (auto& it: m_AckRequests)
+			{
+				htobe16buf (v.data () + offset, it.first); offset += 2;
+				htobe16buf (v.data () + offset, it.second); offset += 2;
+			}	
+			m_AckRequests.clear ();
+		}	
+		// next keys
+		if (m_SendReverseKey)
+		{
+			v[offset] = eECIESx25519BlkNextKey; offset++;
+			htobe16buf (v.data () + offset, m_NextReceiveRatchet->newKey ? 35 : 3); offset += 2;
+			v[offset] = ECIESX25519_NEXT_KEY_REVERSE_KEY_FLAG; 
+			int keyID = m_NextReceiveRatchet->keyID - 1;
+			if (m_NextReceiveRatchet->newKey) 
+			{	
+				v[offset] |= ECIESX25519_NEXT_KEY_KEY_PRESENT_FLAG;
+				keyID++;
+			}	
+			offset++; // flag
+			htobe16buf (v.data () + offset, keyID); offset += 2; // keyid
+			if (m_NextReceiveRatchet->newKey)
+			{	
+				memcpy (v.data () + offset, m_NextReceiveRatchet->key.GetPublicKey (), 32); 
+				offset += 32; // public key
+			}	
+			m_SendReverseKey = false;
+		}	
         // padding
         v[offset] = eECIESx25519BlkPadding; offset++; 
         htobe16buf (v.data () + offset, paddingSize); offset += 2;
@@ -551,6 +716,7 @@ namespace garlic
 				LogPrint (eLogError, "Garlic: No inbound tunnels in the pool for DeliveryStatus");
 				return 0;
 			}	
+			*buf = msg->GetTypeID (); // I2NP msg type
 			htobe32buf (buf + 1, msg->GetMsgID ()); // msgID     
         	htobe32buf (buf + 5, msg->GetExpiration ()/1000); // expiration in seconds     
         	memcpy (buf + 9, msg->GetPayload (), msg->GetPayloadLength ());
@@ -560,16 +726,52 @@ namespace garlic
 		return cloveSize + 3;
 	}	
 		
-	void ECIESX25519AEADRatchetSession::GenerateMoreReceiveTags (int numTags)
+	void ECIESX25519AEADRatchetSession::GenerateMoreReceiveTags (std::shared_ptr<RatchetTagSet> receiveTagset, int numTags)
 	{
 		for (int i = 0; i < numTags; i++)
-		{
-			auto index = m_ReceiveTagset.GetNextIndex ();
-			uint64_t tag = m_ReceiveTagset.GetNextSessionTag ();
-			GetOwner ()->AddECIESx25519SessionTag (index, tag, shared_from_this ());
-		}	
-		m_NumReceiveTags += numTags;	
+			GetOwner ()->AddECIESx25519SessionNextTag (receiveTagset);
 	}	
+
+	bool ECIESX25519AEADRatchetSession::CheckExpired (uint64_t ts)
+	{ 
+		CleanupUnconfirmedLeaseSet (ts);
+		return ts > m_LastActivityTimestamp + ECIESX25519_EXPIRATION_TIMEOUT; 
+	}	
+
+	std::shared_ptr<I2NPMessage> WrapECIESX25519AEADRatchetMessage (std::shared_ptr<const I2NPMessage> msg, const uint8_t * key, uint64_t tag)
+	{
+		auto m = NewI2NPMessage ();
+		m->Align (12); // in order to get buf aligned to 16 (12 + 4)
+		uint8_t * buf = m->GetPayload () + 4; // 4 bytes for length
+		uint8_t nonce[12];
+		memset (nonce, 0, 12); // n = 0 
+		size_t offset = 0;
+		memcpy (buf + offset, &tag, 8); offset += 8;
+		auto payload = buf + offset;
+		uint16_t cloveSize = msg->GetPayloadLength () + 9 + 1;
+		size_t len = cloveSize + 3;
+        payload[0] = eECIESx25519BlkGalicClove; // clove type
+        htobe16buf (payload + 1, cloveSize); // size   
+		payload += 3;
+		*payload = 0; payload++;	// flag and delivery instructions
+        *payload = msg->GetTypeID (); // I2NP msg type
+        htobe32buf (payload + 1, msg->GetMsgID ()); // msgID     
+        htobe32buf (payload + 5, msg->GetExpiration ()/1000); // expiration in seconds     
+        memcpy (payload + 9, msg->GetPayload (), msg->GetPayloadLength ());
+
+		if (!i2p::crypto::AEADChaCha20Poly1305 (buf + offset, len, buf, 8, key, nonce, buf + offset, len + 16, true)) // encrypt
+		{
+			LogPrint (eLogWarning, "Garlic: Payload section AEAD encryption failed");
+			return nullptr;
+		}		
+		offset += len + 16;
+		
+		htobe32buf (m->GetPayload (), offset);
+		m->len += offset + 4;
+		m->FillI2NPMessageHeader (eI2NPGarlic);
+		return m;
+	}
+		
 }
 }
 

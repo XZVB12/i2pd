@@ -34,12 +34,11 @@ namespace data
 	}
 
 	IdentityEx::IdentityEx ():
-		m_IsVerifierCreated (false), m_ExtendedLen (0), m_ExtendedBuffer (nullptr)
+		m_ExtendedLen (0), m_ExtendedBuffer (nullptr)
 	{
 	}
 
-	IdentityEx::IdentityEx(const uint8_t * publicKey, const uint8_t * signingKey, SigningKeyType type, CryptoKeyType cryptoType):
-		m_IsVerifierCreated (false)
+	IdentityEx::IdentityEx(const uint8_t * publicKey, const uint8_t * signingKey, SigningKeyType type, CryptoKeyType cryptoType)
 	{
 		memcpy (m_StandardIdentity.publicKey, publicKey, 256); // publicKey in awlays assumed 256 regardless actual size, padding must be taken care of
 		if (type != SIGNING_KEY_TYPE_DSA_SHA1)
@@ -141,19 +140,19 @@ namespace data
 	}
 
 	IdentityEx::IdentityEx (const uint8_t * buf, size_t len):
-		m_IsVerifierCreated (false), m_ExtendedLen (0), m_ExtendedBuffer (nullptr)
+		m_ExtendedLen (0), m_ExtendedBuffer (nullptr)
 	{
 		FromBuffer (buf, len);
 	}
 
 	IdentityEx::IdentityEx (const IdentityEx& other):
-		m_IsVerifierCreated (false), m_ExtendedLen (0), m_ExtendedBuffer (nullptr)
+		m_ExtendedLen (0), m_ExtendedBuffer (nullptr)
 	{
 		*this = other;
 	}
 
 	IdentityEx::IdentityEx (const Identity& standard):
-		m_IsVerifierCreated (false), m_ExtendedLen (0), m_ExtendedBuffer (nullptr)
+		m_ExtendedLen (0), m_ExtendedBuffer (nullptr)
 	{
 		*this = standard;
 	}
@@ -161,6 +160,7 @@ namespace data
 	IdentityEx::~IdentityEx ()
 	{
 		delete[] m_ExtendedBuffer;
+		delete m_Verifier;
 	}
 
 	IdentityEx& IdentityEx::operator=(const IdentityEx& other)
@@ -178,8 +178,8 @@ namespace data
 		else
 			m_ExtendedBuffer = nullptr;
 
+		delete m_Verifier;
 		m_Verifier = nullptr;
-		m_IsVerifierCreated = false;
 
 		return *this;
 	}
@@ -193,8 +193,8 @@ namespace data
 		m_ExtendedBuffer = nullptr;
 		m_ExtendedLen = 0;
 
+		delete m_Verifier;
 		m_Verifier = nullptr;
-		m_IsVerifierCreated = false;
 
 		return *this;
 	}
@@ -233,6 +233,7 @@ namespace data
 		}
 		SHA256(buf, GetFullLen (), m_IdentHash);
 
+		delete m_Verifier;
 		m_Verifier = nullptr;
 
 		return GetFullLen ();
@@ -381,33 +382,27 @@ namespace data
 
 	void IdentityEx::UpdateVerifier (i2p::crypto::Verifier * verifier) const
 	{
-		if (!m_Verifier)
+		bool del = false;
 		{
-			auto created = m_IsVerifierCreated.exchange (true);
-			if (!created)
-				m_Verifier.reset (verifier);
+			std::lock_guard<std::mutex> l(m_VerifierMutex);
+			if (!m_Verifier)
+				m_Verifier = verifier;
 			else
-			{
-				delete verifier;
-				int count = 0;
-				while (!m_Verifier && count < 500) // 5 seconds
-				{
-					std::this_thread::sleep_for (std::chrono::milliseconds(10));
-					count++;
-				}
-				if (!m_Verifier)
-					LogPrint (eLogError, "Identity: couldn't get verifier in 5 seconds");
-			}
+				del = true;
 		}
-		else
+		if (del)	
 			delete verifier;
 	}
 
 	void IdentityEx::DropVerifier () const
 	{
-		// TODO: potential race condition with Verify
-		m_IsVerifierCreated = false;
-		m_Verifier = nullptr;
+		i2p::crypto::Verifier * verifier;
+		{
+			std::lock_guard<std::mutex> l(m_VerifierMutex);
+			verifier = m_Verifier;
+			m_Verifier = nullptr;
+		}
+		delete verifier;
 	}
 
 	std::shared_ptr<i2p::crypto::CryptoKeyEncryptor> IdentityEx::CreateEncryptor (CryptoKeyType keyType, const uint8_t * key)
@@ -417,7 +412,7 @@ namespace data
 			case CRYPTO_KEY_TYPE_ELGAMAL:
 				return std::make_shared<i2p::crypto::ElGamalEncryptor>(key);
 			break;
-			case CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RARCHET:
+			case CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET:
 				return std::make_shared<i2p::crypto::ECIESX25519AEADRatchetEncryptor>(key);
 			break;
 			case CRYPTO_KEY_TYPE_ECIES_P256_SHA256_AES256CBC:
@@ -677,7 +672,7 @@ namespace data
 			case CRYPTO_KEY_TYPE_ECIES_GOSTR3410_CRYPTO_PRO_A_SHA256_AES256CBC:
 				return std::make_shared<i2p::crypto::ECIESGOSTR3410Decryptor>(key);
 			break;
-			case CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RARCHET:
+			case CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET:
 				return std::make_shared<i2p::crypto::ECIESX25519AEADRatchetDecryptor>(key);
 			break;
 			default:
@@ -759,7 +754,7 @@ namespace data
 			case CRYPTO_KEY_TYPE_ECIES_GOSTR3410_CRYPTO_PRO_A_SHA256_AES256CBC:
 				i2p::crypto::CreateECIESGOSTR3410RandomKeys (priv, pub);
 			break;
-			case CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RARCHET:
+			case CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET:
 				i2p::crypto::CreateECIESX25519AEADRatchetRandomKeys (priv, pub);
 			break;
 			default:

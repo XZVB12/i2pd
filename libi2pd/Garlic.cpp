@@ -70,6 +70,16 @@ namespace garlic
 		return false;
 	}	
 
+	void GarlicRoutingSession::CleanupUnconfirmedLeaseSet (uint64_t ts)
+	{
+		if (m_LeaseSetUpdateMsgID && ts*1000LL > m_LeaseSetSubmissionTime + LEASET_CONFIRMATION_TIMEOUT)
+		{
+			if (GetOwner ())
+				GetOwner ()->RemoveDeliveryStatusSession (m_LeaseSetUpdateMsgID);
+			m_LeaseSetUpdateMsgID = 0;
+		}
+	}	
+		
 	std::shared_ptr<I2NPMessage> GarlicRoutingSession::CreateEncryptedDeliveryStatusMsg (uint32_t msgID)
 	{
 		auto msg = CreateDeliveryStatusMsg (msgID);
@@ -390,12 +400,7 @@ namespace garlic
 				++it;
 		}
 		CleanupUnconfirmedTags ();
-		if (GetLeaseSetUpdateMsgID () && ts*1000LL > GetLeaseSetSubmissionTime () + LEASET_CONFIRMATION_TIMEOUT)
-		{
-			if (GetOwner ())
-				GetOwner ()->RemoveDeliveryStatusSession (GetLeaseSetUpdateMsgID ());
-			SetLeaseSetUpdateMsgID (0);
-		}
+		CleanupUnconfirmedLeaseSet (ts);
 		return !m_SessionTags.empty () || !m_UnconfirmedTagsMsgs.empty ();
 	}
 
@@ -461,8 +466,9 @@ namespace garlic
 			LogPrint (eLogWarning, "Garlic: message length ", length, " exceeds I2NP message length ", msg->GetLength ());
 			return;
 		}
+		auto mod = length & 0x0f; // %16
 		buf += 4; // length
-		auto it = m_Tags.find (SessionTag(buf));
+		auto it = !mod ? m_Tags.find (SessionTag(buf)) : m_Tags.end (); // AES block is multiple of 16
 		// AES tag might be used even if encryption type is not ElGamal/AES
 		if (it != m_Tags.end ())
 		{
@@ -481,27 +487,50 @@ namespace garlic
 				LogPrint (eLogWarning, "Garlic: message length ", length, " is less than 32 bytes");
 		}
 		else
-		{
-			// tag not found. Handle depending on encryption type
-			if (GetEncryptionType () == i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RARCHET)
+		{	
+			bool found = false;
+			if (SupportsEncryptionType (i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET))
 			{
-				HandleECIESx25519 (buf, length);	
-				return;
+				// try ECIESx25519 tag
+				uint64_t tag;
+				memcpy (&tag, buf, 8);
+				auto it1 = m_ECIESx25519Tags.find (tag);
+				if (it1 != m_ECIESx25519Tags.end ())
+				{
+					found = true;
+					auto session = it1->second.tagset->GetSession ();
+					if (!session || !session->HandleNextMessage (buf, length, it1->second.tagset, it1->second.index))
+						LogPrint (eLogError, "Garlic: can't handle ECIES-X25519-AEAD-Ratchet message");	
+					m_ECIESx25519Tags.erase (it1);
+				}
 			}	
-			// otherwise assume ElGamal/AES	
-			ElGamalBlock elGamal;
-			if (length >= 514 && Decrypt (buf, (uint8_t *)&elGamal, m_Ctx))
+ 
+			if (!found) // assume new session 
 			{
-				auto decryption = std::make_shared<AESDecryption>(elGamal.sessionKey);
-				uint8_t iv[32]; // IV is first 16 bytes
-				SHA256(elGamal.preIV, 32, iv);
-				decryption->SetIV (iv);
-				decryption->Decrypt(buf + 514, length - 514, buf + 514);
-				HandleAESBlock (buf + 514, length - 514, decryption, msg->from);
+				// AES tag not found. Handle depending on encryption type		
+				// try ElGamal/AES first if leading block is 514	
+				ElGamalBlock elGamal;
+				if (mod == 2 && length >= 514 && SupportsEncryptionType (i2p::data::CRYPTO_KEY_TYPE_ELGAMAL) &&
+					Decrypt (buf, (uint8_t *)&elGamal, m_Ctx, i2p::data::CRYPTO_KEY_TYPE_ELGAMAL))
+				{
+					auto decryption = std::make_shared<AESDecryption>(elGamal.sessionKey);
+					uint8_t iv[32]; // IV is first 16 bytes
+					SHA256(elGamal.preIV, 32, iv);
+					decryption->SetIV (iv);
+					decryption->Decrypt(buf + 514, length - 514, buf + 514);
+					HandleAESBlock (buf + 514, length - 514, decryption, msg->from);
+				}
+				else if (SupportsEncryptionType (i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET))
+				{	
+					// otherwise ECIESx25519	
+					auto session = std::make_shared<ECIESX25519AEADRatchetSession> (this, false); // incoming
+					if (!session->HandleNextMessage (buf, length, nullptr, 0))
+        				LogPrint (eLogError, "Garlic: can't handle ECIES-X25519-AEAD-Ratchet message");
+				}	
+				else
+					LogPrint (eLogError, "Garlic: Failed to decrypt message");	
 			}
-			else
-				LogPrint (eLogError, "Garlic: Failed to decrypt message");
-		}
+		}	
 	}
 
 	void GarlicDestination::HandleAESBlock (uint8_t * buf, size_t len, std::shared_ptr<AESDecryption> decryption,
@@ -674,8 +703,8 @@ namespace garlic
 	std::shared_ptr<GarlicRoutingSession> GarlicDestination::GetRoutingSession (
 		std::shared_ptr<const i2p::data::RoutingDestination> destination, bool attachLeaseSet)
 	{
-        if (destination->GetEncryptionType () == i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RARCHET &&
-            GetEncryptionType () == i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RARCHET)
+        if (destination->GetEncryptionType () == i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET &&
+            SupportsEncryptionType (i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD_RATCHET))
         {
             ECIESX25519AEADRatchetSessionPtr session;
             uint8_t staticKey[32];
@@ -685,7 +714,7 @@ namespace garlic
 		        session = it->second;
             if (!session)
 			{
-				session = std::make_shared<ECIESX25519AEADRatchetSession> (this);
+				session = std::make_shared<ECIESX25519AEADRatchetSession> (this, true);
 				session->SetRemoteStaticKey (staticKey);
 			}	
 			session->SetDestination (destination->GetIdentHash ()); // TODO: remove
@@ -767,7 +796,7 @@ namespace garlic
 
 		for (auto it = m_ECIESx25519Sessions.begin (); it != m_ECIESx25519Sessions.end ();)
 		{
-			if (it->second->IsExpired (ts))
+			if (it->second->CheckExpired (ts))
 			{
 				it->second->SetOwner (nullptr);
 				it = m_ECIESx25519Sessions.erase (it);
@@ -783,7 +812,7 @@ namespace garlic
 		m_DeliveryStatusSessions.erase (msgID);
 	}
 
-	void GarlicDestination::DeliveryStatusSent (ElGamalAESSessionPtr session, uint32_t msgID)
+	void GarlicDestination::DeliveryStatusSent (GarlicRoutingSessionPtr session, uint32_t msgID)
 	{
 		std::unique_lock<std::mutex> l(m_DeliveryStatusSessionsMutex);
 		m_DeliveryStatusSessions[msgID] = session;
@@ -885,7 +914,7 @@ namespace garlic
 					m_Tags.insert (std::make_pair (SessionTag (tag, ts), decryption));
 				}
 				if (!m_Tags.empty ())
-					LogPrint (eLogInfo, m_Tags.size (), " loaded for ", ident);
+					LogPrint (eLogInfo, "Garlic: ", m_Tags.size (), " tags loaded for ", ident);
 			}
 		}
 		i2p::fs::Remove (path);
@@ -899,26 +928,6 @@ namespace garlic
 		for (auto  it: files)
 			if (ts >= i2p::fs::GetLastUpdateTime (it) + INCOMING_TAGS_EXPIRATION_TIMEOUT)
 				 i2p::fs::Remove (it);
-	}
-
-	void GarlicDestination::HandleECIESx25519 (const uint8_t * buf, size_t len)
-	{
-        uint64_t tag;
-        memcpy (&tag, buf, 8);
-		ECIESX25519AEADRatchetSessionPtr session;
-		int index = 0;	
-        auto it = m_ECIESx25519Tags.find (tag);
-		if (it != m_ECIESx25519Tags.end ())
-		{
-        	session = it->second.session;
-			index = it->second.index;
-			m_ECIESx25519Tags.erase (tag);
-		}	
-		else
-			session = std::make_shared<ECIESX25519AEADRatchetSession> (this); // incoming
-		
-		if (!session->HandleNextMessage (buf, len, index))
-        	LogPrint (eLogError, "Garlic: can't handle ECIES-X25519-AEAD-Ratchet message");
 	}
 
     void GarlicDestination::HandleECIESx25519GarlicClove (const uint8_t * buf, size_t len)
@@ -980,9 +989,11 @@ namespace garlic
 		} 
     }
 
-    void GarlicDestination::AddECIESx25519SessionTag (int index, uint64_t tag, ECIESX25519AEADRatchetSessionPtr session)
+    void GarlicDestination::AddECIESx25519SessionNextTag (RatchetTagSetPtr tagset)
     {
-        m_ECIESx25519Tags.emplace (tag, ECIESX25519AEADRatchetIndexSession{index, session, i2p::util::GetSecondsSinceEpoch ()});
+		auto index = tagset->GetNextIndex ();
+		uint64_t tag = tagset->GetNextSessionTag ();
+        m_ECIESx25519Tags.emplace (tag, ECIESX25519AEADRatchetIndexTagset{index, tagset, i2p::util::GetSecondsSinceEpoch ()});
     }
 
 	void GarlicDestination::AddECIESx25519Session (const uint8_t * staticKey, ECIESX25519AEADRatchetSessionPtr session)

@@ -59,7 +59,7 @@ namespace client
 		m_Decryptor = i2p::data::PrivateKeys::CreateDecryptor (m_Identity->GetCryptoKeyType (), m_EncryptionPrivateKey);
 	}
 
-	bool I2CPDestination::Decrypt (const uint8_t * encrypted, uint8_t * data, BN_CTX * ctx) const
+	bool I2CPDestination::Decrypt (const uint8_t * encrypted, uint8_t * data, BN_CTX * ctx, i2p::data::CryptoKeyType preferredCrypto) const
 	{
 		if (m_Decryptor)
 			return m_Decryptor->Decrypt (encrypted, data, ctx, true);
@@ -246,8 +246,16 @@ namespace client
 			m_PayloadLen = bufbe32toh (m_Header + I2CP_HEADER_LENGTH_OFFSET);
 			if (m_PayloadLen > 0)
 			{
-				m_Payload = new uint8_t[m_PayloadLen];
-				ReceivePayload ();
+				if (m_PayloadLen <= I2CP_MAX_MESSAGE_LENGTH)
+				{	
+					m_Payload = new uint8_t[m_PayloadLen];
+					ReceivePayload ();
+				}
+				else
+				{
+					LogPrint (eLogError, "I2CP: Unexpected payload length ", m_PayloadLen); 
+					Terminate ();
+				}	
 			}
 			else // no following payload
 			{
@@ -572,7 +580,7 @@ namespace client
 					uint16_t keyType = bufbe16toh (buf + offset); offset += 2; // encryption type
 					uint16_t keyLen = bufbe16toh (buf + offset); offset += 2;  // private key length
 					if (offset + keyLen > len) return;
-					if (keyType > currentKeyType)
+					if (!currentKey || keyType > currentKeyType)
 					{
 						currentKeyType = keyType;
 						currentKey = buf + offset;

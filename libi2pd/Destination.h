@@ -1,6 +1,7 @@
 #ifndef DESTINATION_H__
 #define DESTINATION_H__
 
+#include <string.h>
 #include <thread>
 #include <mutex>
 #include <memory>
@@ -8,9 +9,6 @@
 #include <set>
 #include <string>
 #include <functional>
-#ifdef I2LUA
-#include <future>
-#endif
 #include <boost/asio.hpp>
 #include "Identity.h"
 #include "TunnelPool.h"
@@ -161,6 +159,7 @@ namespace client
 			void HandleRequestTimoutTimer (const boost::system::error_code& ecode, const i2p::data::IdentHash& dest);
 			void HandleCleanupTimer (const boost::system::error_code& ecode);
 			void CleanupRemoteLeaseSets ();
+			i2p::data::CryptoKeyType GetPreferredCryptoType () const;
 
 		private:
 
@@ -194,14 +193,18 @@ namespace client
 
 	class ClientDestination: public LeaseSetDestination
 	{
+		struct EncryptionKey
+		{
+			uint8_t pub[256], priv[256];
+			i2p::data::CryptoKeyType keyType;
+			std::shared_ptr<i2p::crypto::CryptoKeyDecryptor> decryptor;
+
+			EncryptionKey (i2p::data::CryptoKeyType t):keyType(t) { memset (pub, 0, 256); memset (priv, 0, 256);	};
+			void GenerateKeys () { i2p::data::PrivateKeys::GenerateCryptoKeyPair (keyType, priv, pub); };
+			void CreateDecryptor () { decryptor = i2p::data::PrivateKeys::CreateDecryptor (keyType, priv); };
+		};	
+		
 		public:
-#ifdef I2LUA
-			// type for informing that a client destination is ready
-			typedef std::promise<std::shared_ptr<ClientDestination> > ReadyPromise;
-			// informs promise with shared_from_this() when this destination is ready to use
-			// if cancelled before ready, informs promise with nullptr
-			void Ready(ReadyPromise & p);
-#endif
 
 			ClientDestination (boost::asio::io_service& service, const i2p::data::PrivateKeys& keys, 
 				bool isPublic, const std::map<std::string, std::string> * params = nullptr);
@@ -232,14 +235,14 @@ namespace client
 			int GetStreamingAckDelay () const { return m_StreamingAckDelay; }
 
 			// datagram
-      i2p::datagram::DatagramDestination * GetDatagramDestination () const { return m_DatagramDestination; };
-      i2p::datagram::DatagramDestination * CreateDatagramDestination ();
+      		i2p::datagram::DatagramDestination * GetDatagramDestination () const { return m_DatagramDestination; };
+      		i2p::datagram::DatagramDestination * CreateDatagramDestination ();
 
 			// implements LocalDestination
-			bool Decrypt (const uint8_t * encrypted, uint8_t * data, BN_CTX * ctx) const;
+			bool Decrypt (const uint8_t * encrypted, uint8_t * data, BN_CTX * ctx, i2p::data::CryptoKeyType preferredCrypto) const;
 			std::shared_ptr<const i2p::data::IdentityEx> GetIdentity () const { return m_Keys.GetPublic (); };
-			i2p::data::CryptoKeyType GetEncryptionType () const { return m_EncryptionKeyType; };
-			const uint8_t * GetEncryptionPublicKey () const { return m_EncryptionPublicKey; };
+			bool SupportsEncryptionType (i2p::data::CryptoKeyType keyType) const; 
+			const uint8_t * GetEncryptionPublicKey (i2p::data::CryptoKeyType keyType) const;
 
 		protected:
 
@@ -250,22 +253,17 @@ namespace client
 
 		private:
 
-			std::shared_ptr<ClientDestination> GetSharedFromThis ()
-			{ return std::static_pointer_cast<ClientDestination>(shared_from_this ()); }
-			void PersistTemporaryKeys ();
-#ifdef I2LUA
-			void ScheduleCheckForReady(ReadyPromise * p);
-			void HandleCheckForReady(const boost::system::error_code & ecode, ReadyPromise * p);
-#endif
-
+			std::shared_ptr<ClientDestination> GetSharedFromThis () {
+				return std::static_pointer_cast<ClientDestination>(shared_from_this ());
+			}
+			void PersistTemporaryKeys (EncryptionKey * keys, bool isSingleKey);
 			void ReadAuthKey (const std::string& group, const std::map<std::string, std::string> * params);
 
-		private:
-
+		private:	
+			
 			i2p::data::PrivateKeys m_Keys;
-			uint8_t m_EncryptionPublicKey[256], m_EncryptionPrivateKey[256];
-			i2p::data::CryptoKeyType m_EncryptionKeyType;
-			std::shared_ptr<i2p::crypto::CryptoKeyDecryptor> m_Decryptor;
+			std::unique_ptr<EncryptionKey> m_StandardEncryptionKey;
+			std::unique_ptr<EncryptionKey> m_ECIESx25519EncryptionKey;
 
 			int m_StreamingAckDelay;
 			std::shared_ptr<i2p::stream::StreamingDestination> m_StreamingDestination; // default
