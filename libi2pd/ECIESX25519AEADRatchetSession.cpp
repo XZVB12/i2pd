@@ -38,7 +38,11 @@ namespace garlic
     {
         i2p::crypto::HKDF (m_KeyData.GetSessTagCK (), m_SessTagConstant, 32, "SessionTagKeyGen", m_KeyData.buf); // [sessTag_ck, tag] = HKDF(sessTag_chainkey, SESSTAG_CONSTANT, "SessionTagKeyGen", 64)
 		m_NextIndex++;	
-		if (m_NextIndex >= 65535) m_NextIndex = 0; // TODO: dirty hack, should create new tagset
+		if (m_NextIndex >= 65535) 
+		{
+			LogPrint (eLogError, "Garlic: Tagset ", GetTagSetID (), " is empty");
+			return 0;
+		}	
         return m_KeyData.GetTag ();
     }
 
@@ -251,7 +255,26 @@ namespace garlic
 		uint8_t flag = buf[0]; buf++; // flag
 		if (flag & ECIESX25519_NEXT_KEY_REVERSE_KEY_FLAG)
 		{
-			// TODO: implement
+			if (!m_SendForwardKey || !m_NextSendRatchet) return;
+			uint16_t keyID = bufbe16toh (buf); buf += 2; // keyID
+			if (((!m_NextSendRatchet->newKey || !m_NextSendRatchet->keyID) && keyID == m_NextSendRatchet->keyID) ||
+			    (m_NextSendRatchet->newKey && keyID == m_NextSendRatchet->keyID -1))
+			{
+				if (flag & ECIESX25519_NEXT_KEY_KEY_PRESENT_FLAG)
+					memcpy (m_NextSendRatchet->remote, buf, 32);
+				uint8_t sharedSecret[32], tagsetKey[32];
+				m_NextSendRatchet->key.Agree (m_NextSendRatchet->remote, sharedSecret);
+				i2p::crypto::HKDF (sharedSecret, nullptr, 0, "XDHRatchetTagSet", tagsetKey, 32); // tagsetKey = HKDF(sharedSecret, ZEROLEN, "XDHRatchetTagSet", 32)
+				auto newTagset = std::make_shared<RatchetTagSet> (shared_from_this ());
+				newTagset->SetTagSetID (1 + m_NextSendRatchet->keyID + keyID);
+				newTagset->DHInitialize (m_SendTagset->GetNextRootKey (), tagsetKey); 
+				newTagset->NextSessionTagRatchet ();
+				m_SendTagset = newTagset;			
+				m_SendForwardKey = false;
+				LogPrint (eLogDebug, "Garlic: next send tagset ", newTagset->GetTagSetID (), " created");
+			}
+			else
+				LogPrint (eLogDebug, "Garlic: Unexpected next key ", keyID);
 		}	
 		else
 		{
@@ -291,6 +314,27 @@ namespace garlic
 			GenerateMoreReceiveTags (newTagset, GetOwner ()->GetNumTags ());		
 			LogPrint (eLogDebug, "Garlic: next receive tagset ", tagsetID, " created");
 		}	
+	}	
+
+	void ECIESX25519AEADRatchetSession::NewNextSendRatchet ()
+	{
+		if (m_NextSendRatchet)
+		{
+			if (!m_NextSendRatchet->newKey || !m_NextSendRatchet->keyID)
+			{
+				m_NextSendRatchet->keyID++;
+				m_NextSendRatchet->newKey = true;
+			}	
+			else
+				m_NextSendRatchet->newKey = false;
+		}	
+		else
+			m_NextSendRatchet.reset (new DHRatchet ());
+		if (m_NextSendRatchet->newKey)
+			m_NextSendRatchet->key.GenerateKeys ();
+		
+		m_SendForwardKey = true;
+		LogPrint (eLogDebug, "Garlic: new send ratchet ", m_NextSendRatchet->newKey ? "new" : "old", " key ", m_NextSendRatchet->keyID, " created");
 	}	
 		
     bool ECIESX25519AEADRatchetSession::NewOutgoingSessionMessage (const uint8_t * payload, size_t len, uint8_t * out, size_t outLen)
@@ -487,7 +531,9 @@ namespace garlic
 		{
 			LogPrint (eLogWarning, "Garlic: Payload section AEAD encryption failed");
 			return false;
-		}		
+		}	
+		if (index >= ECIESX25519_TAGSET_MAX_NUM_TAGS && !m_SendForwardKey)
+			NewNextSendRatchet ();	
 		return true;
 	}
 
@@ -601,6 +647,11 @@ namespace garlic
 			payloadLen += 6;
 			if (m_NextReceiveRatchet->newKey) payloadLen += 32;
 		}	
+		if (m_SendForwardKey)
+		{
+			payloadLen += 6;
+			if (m_NextSendRatchet->newKey) payloadLen += 32;
+		}	
         uint8_t paddingSize;
         RAND_bytes (&paddingSize, 1);
         paddingSize &= 0x0F; paddingSize++; // 1 - 16
@@ -661,6 +712,20 @@ namespace garlic
 				offset += 32; // public key
 			}	
 			m_SendReverseKey = false;
+		}	
+		if (m_SendForwardKey)
+		{
+			v[offset] = eECIESx25519BlkNextKey; offset++;
+			htobe16buf (v.data () + offset, m_NextSendRatchet->newKey ? 35 : 3); offset += 2;
+			v[offset] = m_NextSendRatchet->newKey ? ECIESX25519_NEXT_KEY_KEY_PRESENT_FLAG : ECIESX25519_NEXT_KEY_REQUEST_REVERSE_KEY_FLAG; 
+			if (!m_NextSendRatchet->keyID) v[offset] |= ECIESX25519_NEXT_KEY_REQUEST_REVERSE_KEY_FLAG; // for first key only
+			offset++; // flag
+			htobe16buf (v.data () + offset, m_NextSendRatchet->keyID); offset += 2; // keyid
+			if (m_NextSendRatchet->newKey)
+			{	
+				memcpy (v.data () + offset, m_NextSendRatchet->key.GetPublicKey (), 32); 
+				offset += 32; // public key
+			}	
 		}	
         // padding
         v[offset] = eECIESx25519BlkPadding; offset++; 
