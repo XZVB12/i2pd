@@ -1,3 +1,11 @@
+/*
+* Copyright (c) 2013-2020, The PurpleI2P Project
+*
+* This file is part of Purple i2pd project and licensed under BSD3
+*
+* See full license text in LICENSE file at top of project tree
+*/
+
 #include <iomanip>
 #include <sstream>
 #include <thread>
@@ -22,6 +30,7 @@
 #include "HTTPServer.h"
 #include "Daemon.h"
 #include "util.h"
+#include "ECIESX25519AEADRatchetSession.h"
 #ifdef WIN32_APP
 #include "Win32/Win32App.h"
 #endif
@@ -398,18 +407,36 @@ namespace http {
 			}
 		}
 		s << "<br>\r\n";
-		s << "<b>Tags</b><br>Incoming: <i>" << dest->GetNumIncomingTags () << "</i><br>";
+
+		s << "<b>Tags</b><br>\r\nIncoming: <i>" << dest->GetNumIncomingTags () << "</i><br>\r\n";
 		if (!dest->GetSessions ().empty ()) {
 			std::stringstream tmp_s; uint32_t out_tags = 0;
 			for (const auto& it: dest->GetSessions ()) {
 				tmp_s << "<tr><td>" << i2p::client::context.GetAddressBook ().ToAddress(it.first) << "</td><td>" << it.second->GetNumOutgoingTags () << "</td></tr>\r\n";
-				out_tags = out_tags + it.second->GetNumOutgoingTags ();
+				out_tags += it.second->GetNumOutgoingTags ();
 			}
 			s << "<div class='slide'><label for='slide-tags'>Outgoing: <i>" << out_tags << "</i></label>\r\n<input type='checkbox' id='slide-tags'/>\r\n"
 			  << "<div class='content'>\r\n<table><tbody><thead><th>Destination</th><th>Amount</th></thead>\r\n" << tmp_s.str () << "</tbody></table>\r\n</div>\r\n</div>\r\n";
 		} else
 			s << "Outgoing: <i>0</i><br>\r\n";
 		s << "<br>\r\n";
+
+		auto numECIESx25519Tags = dest->GetNumIncomingECIESx25519Tags ();
+		if (numECIESx25519Tags > 0) {
+			s << "<b>ECIESx25519</b><br>\r\nIncoming Tags: <i>" << numECIESx25519Tags << "</i><br>\r\n";
+			if (!dest->GetECIESx25519Sessions ().empty ())
+			{
+				std::stringstream tmp_s; uint32_t ecies_sessions = 0;
+				for (const auto& it: dest->GetECIESx25519Sessions ()) {
+					tmp_s << "<tr><td>" << i2p::client::context.GetAddressBook ().ToAddress(it.second->GetDestination ()) << "</td><td>" << it.second->GetState () << "</td></tr>\r\n";
+					ecies_sessions++;
+				}
+				s << "<div class='slide'><label for='slide-ecies-sessions'>Tags sessions: <i>" << ecies_sessions << "</i></label>\r\n<input type='checkbox' id='slide-ecies-sessions'/>\r\n"
+				  << "<div class='content'>\r\n<table><tbody><thead><th>Destination</th><th>Status</th></thead>\r\n" << tmp_s.str () << "</tbody></table>\r\n</div>\r\n</div>\r\n";
+			} else
+				s << "Tags sessions: <i>0</i><br>\r\n";
+			s << "<br>\r\n";
+		}
 	}
 
 	void ShowLocalDestination (std::stringstream& s, const std::string& b32, uint32_t token)
@@ -873,8 +900,8 @@ namespace http {
 	void HTTPConnection::Receive ()
 	{
 		m_Socket->async_read_some (boost::asio::buffer (m_Buffer, HTTP_CONNECTION_BUFFER_SIZE),
-			 std::bind(&HTTPConnection::HandleReceive, shared_from_this (),
-				 std::placeholders::_1, std::placeholders::_2));
+			std::bind(&HTTPConnection::HandleReceive, shared_from_this (),
+				std::placeholders::_1, std::placeholders::_2));
 	}
 
 	void HTTPConnection::HandleReceive (const boost::system::error_code& ecode, std::size_t bytes_transferred)
@@ -1207,8 +1234,9 @@ namespace http {
 			i2p::config::SetOption("http.pass", pass);
 			LogPrint(eLogInfo, "HTTPServer: password set to ", pass);
 		}
+
 		m_IsRunning = true;
-		m_Thread = std::unique_ptr<std::thread>(new std::thread (std::bind (&HTTPServer::Run, this)));
+		m_Thread.reset (new std::thread (std::bind (&HTTPServer::Run, this)));
 		m_Acceptor.listen ();
 		Accept ();
 	}

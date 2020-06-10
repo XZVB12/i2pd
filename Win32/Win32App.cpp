@@ -1,3 +1,11 @@
+/*
+* Copyright (c) 2013-2020, The PurpleI2P Project
+*
+* This file is part of Purple i2pd project and licensed under BSD3
+*
+* See full license text in LICENSE file at top of project tree
+*/
+
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -432,7 +440,7 @@ namespace win32
 		HWND hWnd = FindWindow (I2PD_WIN32_CLASSNAME, TEXT("i2pd"));
 		if (hWnd)
 			PostMessage (hWnd, WM_COMMAND, MAKEWPARAM(ID_EXIT, 0), 0);
-		UnSubscribeFromEvents();
+		// UnSubscribeFromEvents(); // TODO: understand why unsubscribing crashes app
 		UnregisterClass (I2PD_WIN32_CLASSNAME, GetModuleHandle(NULL));
 	}
 
@@ -451,6 +459,5 @@ namespace win32
 			PostMessage (hWnd, WM_COMMAND, MAKEWPARAM(ID_STOP_GRACEFUL_SHUTDOWN, 0), 0);
 		return hWnd;
 	}
-
 }
 }
