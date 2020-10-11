@@ -12,7 +12,6 @@
 #include <memory>
 
 #include <boost/asio.hpp>
-#include <boost/bind.hpp>
 #include <boost/algorithm/string.hpp>
 
 #include "Base.h"
@@ -260,6 +259,9 @@ namespace http {
 					case eRouterErrorClockSkew:
 						s << "<br>Clock skew";
 					break;
+					case eRouterErrorOffline:
+						s << "<br>Offline";
+					break;	
 					default: ;
 				}
 				break;
@@ -733,13 +735,6 @@ namespace http {
 	void ShowTransports (std::stringstream& s)
 	{
 		s << "<b>Transports:</b><br>\r\n";
-		auto ntcpServer = i2p::transport::transports.GetNTCPServer ();
-		if (ntcpServer)
-		{
-			auto sessions = ntcpServer->GetNTCPSessions ();
-			if (!sessions.empty ())
-				ShowNTCPTransports (s, sessions, "NTCP");
-		}
 		auto ntcp2Server = i2p::transport::transports.GetNTCP2Server ();
 		if (ntcp2Server)
 		{
@@ -1321,8 +1316,8 @@ namespace http {
 	void HTTPServer::Accept ()
 	{
 		auto newSocket = std::make_shared<boost::asio::ip::tcp::socket> (m_Service);
-		m_Acceptor.async_accept (*newSocket, boost::bind (&HTTPServer::HandleAccept, this,
-			boost::asio::placeholders::error, newSocket));
+		m_Acceptor.async_accept (*newSocket, std::bind (&HTTPServer::HandleAccept, this,
+			std::placeholders::_1, newSocket));
 	}
 
 	void HTTPServer::HandleAccept(const boost::system::error_code& ecode,
