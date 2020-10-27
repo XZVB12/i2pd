@@ -59,7 +59,6 @@ namespace transport
 			std::condition_variable m_Acquired;
 			std::mutex m_AcquiredMutex;
 	};
-	typedef EphemeralKeysSupplier<i2p::crypto::DHKeys> DHKeysPairSupplier;
 	typedef EphemeralKeysSupplier<i2p::crypto::X25519Keys> X25519KeysPairSupplier;
 	
 	struct Peer
@@ -97,8 +96,6 @@ namespace transport
 			void SetOnline (bool online);
 
 			boost::asio::io_service& GetService () { return *m_Service; };
-			std::shared_ptr<i2p::crypto::DHKeys> GetNextDHKeysPair ();
-			void ReuseDHKeysPair (std::shared_ptr<i2p::crypto::DHKeys> pair);
 			std::shared_ptr<i2p::crypto::X25519Keys> GetNextX25519KeysPair ();
 			void ReuseX25519KeysPair (std::shared_ptr<i2p::crypto::X25519Keys> pair);
 
@@ -136,6 +133,9 @@ namespace transport
 
 			void PeerTest ();
 
+			void SetCheckReserved (bool check) { m_CheckReserved = check; };
+			bool IsCheckReserved () { return m_CheckReserved; };
+
 		private:
 
 			void Run ();
@@ -152,7 +152,7 @@ namespace transport
 		private:
 
 			volatile bool m_IsOnline;
-			bool m_IsRunning, m_IsNAT;
+			bool m_IsRunning, m_IsNAT, m_CheckReserved;
 			std::thread * m_Thread;
 			boost::asio::io_service * m_Service;
 			boost::asio::io_service::work * m_Work;
@@ -163,7 +163,6 @@ namespace transport
 			mutable std::mutex m_PeersMutex;
 			std::unordered_map<i2p::data::IdentHash, Peer> m_Peers;
 
-			DHKeysPairSupplier m_DHKeysPairSupplier;
 			X25519KeysPairSupplier m_X25519KeysPairSupplier;
 
 			std::atomic<uint64_t> m_TotalSentBytes, m_TotalReceivedBytes, m_TotalTransitTransmittedBytes;
