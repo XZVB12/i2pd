@@ -2,7 +2,7 @@
 setlocal enableextensions enabledelayedexpansion
 title Building i2pd
 
-REM Copyright (c) 2013-2017, The PurpleI2P Project
+REM Copyright (c) 2013-2020, The PurpleI2P Project
 REM This file is part of Purple i2pd project and licensed under BSD3
 REM See full license text in LICENSE file at top of project tree
 
@@ -64,7 +64,7 @@ call :BUILDING_XP
 echo.
 
 REM compile installer
-C:\PROGRA~2\INNOSE~1\ISCC.exe /dI2Pd_ver="%tag%" build\win_installer.iss >> build\build.log 2>&1
+C:\PROGRA~2\INNOSE~1\ISCC.exe /dI2Pd_TextVer="%tag%" /dI2Pd_Ver="%tag%.0" build\win_installer.iss >> build\build.log 2>&1
 
 del README.txt i2pd_x32.exe i2pd_x64.exe i2pd_xp.exe >> nul
 

@@ -14,6 +14,7 @@
 #include "Transports.h"
 #include "Config.h"
 #include "HTTP.h"
+#include "util.h"
 
 using namespace i2p::data;
 
@@ -59,6 +60,8 @@ namespace transport
 	template<typename Keys>
 	void EphemeralKeysSupplier<Keys>::Run ()
 	{
+		i2p::util::SetThreadName("Ephemerals");
+
 		while (m_IsRunning)
 		{
 			int num, total = 0;
@@ -272,6 +275,8 @@ namespace transport
 
 	void Transports::Run ()
 	{
+		i2p::util::SetThreadName("Transports");
+
 		while (m_IsRunning && m_Service)
 		{
 			try
@@ -384,16 +389,34 @@ namespace transport
 			peer.router = netdb.FindRouter (ident); // try to get new one from netdb
 		if (peer.router) // we have RI already
 		{
-			if (!peer.numAttempts) // NTCP2
+			if (peer.numAttempts < 2) // NTCP2, 0 - ipv6, 1- ipv4
 			{
-				peer.numAttempts++;
 				if (m_NTCP2Server) // we support NTCP2
 				{
-					// NTCP2 have priority over NTCP
-					auto address = peer.router->GetNTCP2Address (true, !context.SupportsV6 ()); // published only
-					if (address && !peer.router->IsUnreachable () && (!m_CheckReserved || !i2p::util::net::IsInReservedRange(address->host)))
+					std::shared_ptr<const RouterInfo::Address> address;
+					if (!peer.numAttempts) // NTCP2 ipv6
 					{
-						auto s = std::make_shared<NTCP2Session> (*m_NTCP2Server, peer.router);
+						if (context.SupportsV6 ())
+						{	
+							address = peer.router->GetPublishedNTCP2V6Address ();
+							if (address && m_CheckReserved && i2p::util::net::IsInReservedRange(address->host))
+								address = nullptr;
+						}	
+						peer.numAttempts++;
+					}
+					if (!address && peer.numAttempts == 1) // NTCP2 ipv4	
+					{	
+						if (context.SupportsV4 () && !peer.router->IsUnreachable ())
+						{	
+							address = peer.router->GetPublishedNTCP2V4Address ();
+							if (address && m_CheckReserved && i2p::util::net::IsInReservedRange(address->host))
+								address = nullptr;
+						}	
+						peer.numAttempts++;
+					}	
+					if (address)
+					{
+						auto s = std::make_shared<NTCP2Session> (*m_NTCP2Server, peer.router, address);
 
 						if(m_NTCP2Server->UsingProxy())
 						{
@@ -410,8 +433,10 @@ namespace transport
 						return true;
 					}
 				}
+				else
+					peer.numAttempts = 2; // switch to SSU
 			}
-			if (peer.numAttempts == 1)// SSU
+			if (peer.numAttempts == 2)// SSU
 			{
 				peer.numAttempts++;
 				if (m_SSUServer && peer.router->IsSSU (!context.SupportsV6 ()))

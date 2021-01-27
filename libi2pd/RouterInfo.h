@@ -154,6 +154,8 @@ namespace data
 			int GetVersion () const { return m_Version; };
 			Addresses& GetAddresses () { return *m_Addresses; }; // should be called for local RI only, otherwise must return shared_ptr
 			std::shared_ptr<const Address> GetNTCP2Address (bool publishedOnly,  bool v4only = true) const;
+			std::shared_ptr<const Address> GetPublishedNTCP2V4Address () const; 
+			std::shared_ptr<const Address> GetPublishedNTCP2V6Address () const; 
 			std::shared_ptr<const Address> GetSSUAddress (bool v4only = true) const;
 			std::shared_ptr<const Address> GetSSUV6Address () const;
 
@@ -184,7 +186,8 @@ namespace data
 			bool IsHidden () const { return m_Caps & eHidden; };
 			bool IsHighBandwidth () const { return m_Caps & RouterInfo::eHighBandwidth; };
 			bool IsExtraBandwidth () const { return m_Caps & RouterInfo::eExtraBandwidth; };
-
+			bool IsEligibleFloodfill () const;
+		
 			uint8_t GetCaps () const { return m_Caps; };
 			void SetCaps (uint8_t caps);
 			void SetCaps (const char * caps);

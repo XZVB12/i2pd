@@ -18,8 +18,9 @@
 #include "Log.h"
 #include "I2PEndian.h"
 #include "Timestamp.h"
+#include "util.h"
 
-#ifdef WIN32
+#ifdef _WIN32
 	#ifndef _WIN64
 		#define _USE_32BIT_TIME_T
 	#endif
@@ -148,6 +149,8 @@ namespace util
 
 	void NTPTimeSync::Run ()
 	{
+		i2p::util::SetThreadName("Timesync");
+
 		while (m_IsRunning)
 		{
 			try

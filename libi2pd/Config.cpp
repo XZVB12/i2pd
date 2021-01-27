@@ -197,15 +197,17 @@ namespace config {
 			("reseed.proxy", value<std::string>()->default_value(""),     "url for reseed proxy, supports http/socks")
 			("reseed.urls", value<std::string>()->default_value(
 				"https://reseed.i2p-projekt.de/,"
-			    "https://reseed.diva.exchange/,"
-				"https://reseed.i2p2.no/,"
+				"https://reseed.diva.exchange/,"
 				"https://reseed-fr.i2pd.xyz/,"
 				"https://reseed.memcpy.io/,"
 				"https://reseed.onion.im/,"
 				"https://i2pseed.creativecowpat.net:8443/,"
-			    "https://reseed.i2pgit.org/,"                                                				
+				"https://reseed.i2pgit.org/,"
 				"https://i2p.novg.net/"
 			),                                                            "Reseed URLs, separated by comma")
+			("reseed.yggurls", value<std::string>()->default_value(
+				"http://[324:9de3:fea4:f6ac::ace]:7070/"
+			),        													  "Reseed URLs through the Yggdrasil, separated by comma") 	                                                
 		;
 
 		options_description addressbook("AddressBook options");
@@ -213,7 +215,8 @@ namespace config {
 			("addressbook.defaulturl", value<std::string>()->default_value(
 				"http://joajgazyztfssty4w2on5oaqksz6tqoxbduy553y34mf4byv6gpq.b32.i2p/export/alive-hosts.txt"
 			),                                                                     "AddressBook subscription URL for initial setup")
-			("addressbook.subscriptions", value<std::string>()->default_value(""), "AddressBook subscriptions URLs, separated by comma");
+			("addressbook.subscriptions", value<std::string>()->default_value(""), "AddressBook subscriptions URLs, separated by comma")
+			("addressbook.hostsfile", value<std::string>()->default_value(""), "File to dump addresses in hosts.txt format");
 
 		options_description trust("Trust options");
 		trust.add_options()

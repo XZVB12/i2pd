@@ -21,6 +21,7 @@ repositories {
 
 dependencies {
     implementation 'androidx.core:core:1.0.2'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
 }
 
 android {
@@ -30,8 +31,8 @@ android {
         applicationId "org.purplei2p.i2pd"
         targetSdkVersion 29
         minSdkVersion 14
-        versionCode 2340
-        versionName "2.34.0"
+        versionCode 2350
+        versionName "2.35.0"
         setProperty("archivesBaseName", archivesBaseName + "-" + versionName)
         ndk {
             abiFilters 'armeabi-v7a'

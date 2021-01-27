@@ -70,7 +70,7 @@ namespace http {
 		"  .menu { float: left; } .menu a, .commands a { display: block; }\r\n"
 		"  .listitem { display: block; font-family: monospace; font-size: 1.2em; white-space: nowrap; }\r\n"
 		"  .tableitem { font-family: monospace; font-size: 1.2em; white-space: nowrap; }\r\n"
-		"  .content { float: left; font-size: 1em; margin-left: 4em; max-width: 46em; overflow: auto; }\r\n"
+		"  .content { float: left; font-size: 1em; margin-left: 4em; max-width: 45em; overflow: auto; }\r\n"
 		"  .tunnel.established { color: #56B734; } .tunnel.expiring { color: #D3AE3F; }\r\n"
 		"  .tunnel.failed { color: #D33F3F; } .tunnel.building { color: #434343; }\r\n"
 		"  caption { font-size: 1.5em; text-align: center; color: #894C84; }\r\n"
@@ -532,7 +532,7 @@ namespace http {
 		}
 	}
 
-	static void ShowI2CPLocalDestination (std::stringstream& s, const std::string& id)
+    void ShowI2CPLocalDestination (std::stringstream& s, const std::string& id)
 	{
 		auto i2cpServer = i2p::client::context.GetI2CPServer ();
 		if (i2cpServer)
@@ -820,7 +820,7 @@ namespace http {
 			s << "<b>SAM Sessions:</b> no sessions currently running.<br>\r\n";
 	}
 
-	static void ShowSAMSession (std::stringstream& s, const std::string& id)
+    void ShowSAMSession (std::stringstream& s, const std::string& id)
 	{
 		auto sam = i2p::client::context.GetSAMBridge ();
 		if (!sam) {
@@ -1312,6 +1312,8 @@ namespace http {
 
 	void HTTPServer::Run ()
 	{
+		i2p::util::SetThreadName("Webconsole");
+
 		while (m_IsRunning)
 		{
 			try

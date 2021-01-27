@@ -19,7 +19,7 @@
 #include "version.h"
 #include "Log.h"
 #include "Family.h"
-#include "TunnelConfig.h"
+#include "ECIESX25519AEADRatchetSession.h"
 #include "RouterContext.h"
 
 namespace i2p
@@ -45,15 +45,15 @@ namespace i2p
 		if (IsECIES ())
 		{	
 			auto initState = new i2p::crypto::NoiseSymmetricState ();
-			i2p::tunnel::InitBuildRequestRecordNoiseState (*initState);
-			initState->MixHash (GetIdentity ()->GetEncryptionPublicKey (), 32); // h = SHA256(h || hepk)
+			i2p::crypto::InitNoiseNState (*initState, GetIdentity ()->GetEncryptionPublicKey ());
 			m_InitialNoiseState.reset (initState);	
 		}	
 	}
 
 	void RouterContext::CreateNewRouter ()
 	{
-		m_Keys = i2p::data::PrivateKeys::CreateRandomKeys (i2p::data::SIGNING_KEY_TYPE_EDDSA_SHA512_ED25519);
+		m_Keys = i2p::data::PrivateKeys::CreateRandomKeys (i2p::data::SIGNING_KEY_TYPE_EDDSA_SHA512_ED25519,
+			i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD);
 		SaveKeys ();
 		NewRouterInfo ();
 	}
@@ -89,7 +89,7 @@ namespace i2p
 				host = i2p::util::net::GetInterfaceAddress(ifname4, false).to_string();
 
 			if (ssu)
-				routerInfo.AddSSUAddress (host.c_str(), port, routerInfo.GetIdentHash ());
+				routerInfo.AddSSUAddress (host.c_str(), port, nullptr);
 		}
 		if (ipv6)
 		{
@@ -103,7 +103,7 @@ namespace i2p
 				host = i2p::util::net::GetInterfaceAddress(ifname6, true).to_string();
 
 			if (ssu)
-				routerInfo.AddSSUAddress (host.c_str(), port, routerInfo.GetIdentHash ());
+				routerInfo.AddSSUAddress (host.c_str(), port, nullptr);
 		}
 
 		routerInfo.SetCaps (i2p::data::RouterInfo::eReachable |
@@ -486,7 +486,7 @@ namespace i2p
 				if (ssu)
 				{
 					std::string host = "::1"; // TODO: read host
-					m_RouterInfo.AddSSUAddress (host.c_str (), port, GetIdentHash ());
+					m_RouterInfo.AddSSUAddress (host.c_str (), port, nullptr);
 				}
 			}
 			// NTCP2
@@ -564,31 +564,43 @@ namespace i2p
 
 	bool RouterContext::Load ()
 	{
-		std::ifstream fk (i2p::fs::DataDirPath (ROUTER_KEYS), std::ifstream::in | std::ifstream::binary);
-		if (!fk.is_open ())	return false;
-		fk.seekg (0, std::ios::end);
-		size_t len = fk.tellg();
-		fk.seekg (0, std::ios::beg);
+		{
+			std::ifstream fk (i2p::fs::DataDirPath (ROUTER_KEYS), std::ifstream::in | std::ifstream::binary);
+			if (!fk.is_open ())	return false;
+			fk.seekg (0, std::ios::end);
+			size_t len = fk.tellg();
+			fk.seekg (0, std::ios::beg);
 
-		if (len == sizeof (i2p::data::Keys)) // old keys file format
-		{
-			i2p::data::Keys keys;
-			fk.read ((char *)&keys, sizeof (keys));
-			m_Keys = keys;
+			if (len == sizeof (i2p::data::Keys)) // old keys file format
+			{
+				i2p::data::Keys keys;
+				fk.read ((char *)&keys, sizeof (keys));
+				m_Keys = keys;
+			}
+			else // new keys file format
+			{
+				uint8_t * buf = new uint8_t[len];
+				fk.read ((char *)buf, len);
+				m_Keys.FromBuffer (buf, len);
+				delete[] buf;
+			}
 		}
-		else // new keys file format
+		std::shared_ptr<const i2p::data::IdentityEx> oldIdentity;
+		if (m_Keys.GetPublic ()->GetSigningKeyType () == i2p::data::SIGNING_KEY_TYPE_DSA_SHA1)
 		{
-			uint8_t * buf = new uint8_t[len];
-			fk.read ((char *)buf, len);
-			m_Keys.FromBuffer (buf, len);
-			delete[] buf;
-		}
+			// update keys
+			LogPrint (eLogInfo, "Router: router keys are obsolete. Creating new");
+			oldIdentity = m_Keys.GetPublic ();
+			m_Keys = i2p::data::PrivateKeys::CreateRandomKeys (i2p::data::SIGNING_KEY_TYPE_EDDSA_SHA512_ED25519,
+				i2p::data::CRYPTO_KEY_TYPE_ECIES_X25519_AEAD);
+			SaveKeys ();
+		}	
 		// read NTCP2 keys if available
 		std::ifstream n2k (i2p::fs::DataDirPath (NTCP2_KEYS), std::ifstream::in | std::ifstream::binary);
 		if (n2k)
 		{
 			n2k.seekg (0, std::ios::end);
-			len = n2k.tellg();
+			size_t len = n2k.tellg();
 			n2k.seekg (0, std::ios::beg);
 			if (len == sizeof (NTCP2PrivateKeys))
 			{
@@ -598,17 +610,15 @@ namespace i2p
 			n2k.close ();
 		}
 		// read RouterInfo
-		m_RouterInfo.SetRouterIdentity (GetIdentity ());
+		m_RouterInfo.SetRouterIdentity (oldIdentity ? oldIdentity : GetIdentity ());
 		i2p::data::RouterInfo routerInfo(i2p::fs::DataDirPath (ROUTER_INFO));
 		if (!routerInfo.IsUnreachable ()) // router.info looks good
 		{
 			m_RouterInfo.Update (routerInfo.GetBuffer (), routerInfo.GetBufferLen ());
+			if (oldIdentity)
+				m_RouterInfo.SetRouterIdentity (GetIdentity ()); // from new keys
 			m_RouterInfo.SetProperty ("coreVersion", I2P_VERSION);
 			m_RouterInfo.SetProperty ("router.version", I2P_VERSION);
-
-			// Migration to 0.9.24. TODO: remove later
-			m_RouterInfo.DeleteProperty ("coreVersion");
-			m_RouterInfo.DeleteProperty ("stat_uptime");
 		}
 		else
 		{
@@ -665,7 +675,21 @@ namespace i2p
 	void RouterContext::ProcessGarlicMessage (std::shared_ptr<I2NPMessage> msg)
 	{
 		std::unique_lock<std::mutex> l(m_GarlicMutex);
-		i2p::garlic::GarlicDestination::ProcessGarlicMessage (msg);
+		if (IsECIES ())
+		{
+			uint8_t * buf = msg->GetPayload ();
+			uint32_t len = bufbe32toh (buf);
+			if (len > msg->GetLength ())
+			{
+				LogPrint (eLogWarning, "Router: garlic message length ", len, " exceeds I2NP message length ", msg->GetLength ());
+				return;
+			}
+			buf += 4;
+			auto session = std::make_shared<i2p::garlic::ECIESX25519AEADRatchetSession>(this, false);
+			session->HandleNextMessageForRouter (buf, len);
+		}	
+		else	
+			i2p::garlic::GarlicDestination::ProcessGarlicMessage (msg);
 	}
 
 	void RouterContext::ProcessDeliveryStatusMessage (std::shared_ptr<I2NPMessage> msg)
@@ -705,7 +729,11 @@ namespace i2p
 			m_CurrentNoiseState.reset (new i2p::crypto::NoiseSymmetricState (*m_InitialNoiseState));		
 			m_CurrentNoiseState->MixHash (encrypted, 32); // h = SHA256(h || sepk)
 			uint8_t sharedSecret[32];
-			m_Decryptor->Decrypt (encrypted, sharedSecret, ctx, false);
+			if (!m_Decryptor->Decrypt (encrypted, sharedSecret, ctx, false))
+			{
+				LogPrint (eLogWarning, "Router: Incorrect ephemeral public key");
+				return false;
+			}	
 			m_CurrentNoiseState->MixKey (sharedSecret); 
 			encrypted += 32;
 			uint8_t nonce[12];
