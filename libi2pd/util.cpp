@@ -67,7 +67,11 @@ int inet_pton_xp (int af, const char *src, void *dst)
 }
 #else /* !_WIN32 => UNIX */
 #include <sys/types.h>
+#ifdef ANDROID
+#include "ifaddrs.h"
+#else
 #include <ifaddrs.h>
+#endif
 #endif
 
 #define address_pair_v4(a,b) { boost::asio::ip::address_v4::from_string (a).to_ulong (), boost::asio::ip::address_v4::from_string (b).to_ulong () }
@@ -380,11 +384,11 @@ namespace net
 			return boost::asio::ip::address::from_string("127.0.0.1");
 #else
 		int af = (ipv6 ? AF_INET6 : AF_INET);
-		ifaddrs * addrs = nullptr;
+		ifaddrs *addrs, *cur = nullptr;
 		if(getifaddrs(&addrs) == 0)
 		{
 			// got ifaddrs
-			ifaddrs * cur = addrs;
+			cur = addrs;
 			while(cur)
 			{
 				std::string cur_ifname(cur->ifa_name);
@@ -418,39 +422,109 @@ namespace net
 #endif
 	}
 
+	static bool IsYggdrasilAddress (const uint8_t addr[16])
+	{
+		return addr[0] == 0x02 || addr[0] == 0x03;
+	}	
+
+	bool IsYggdrasilAddress (const boost::asio::ip::address& addr)
+	{
+		if (!addr.is_v6 ()) return false;
+		return IsYggdrasilAddress (addr.to_v6 ().to_bytes ().data ());
+	}	
+	
 	boost::asio::ip::address_v6 GetYggdrasilAddress ()
 	{
-#ifdef _WIN32
-		// TODO: implement
+#if defined(_WIN32)
+		ULONG outBufLen = 0;
+		PIP_ADAPTER_ADDRESSES pAddresses = nullptr;
+		PIP_ADAPTER_ADDRESSES pCurrAddresses = nullptr;
+		PIP_ADAPTER_UNICAST_ADDRESS pUnicast = nullptr;
+
+		if(GetAdaptersAddresses(AF_INET6, GAA_FLAG_INCLUDE_PREFIX, nullptr, pAddresses, &outBufLen)
+			== ERROR_BUFFER_OVERFLOW)
+		{
+			FREE(pAddresses);
+			pAddresses = (IP_ADAPTER_ADDRESSES*) MALLOC(outBufLen);
+		}
+
+		DWORD dwRetVal = GetAdaptersAddresses(
+			AF_INET6, GAA_FLAG_INCLUDE_PREFIX, nullptr, pAddresses, &outBufLen
+		);
+
+		if(dwRetVal != NO_ERROR)
+		{
+			LogPrint(eLogError, "NetIface: GetYggdrasilAddress(): enclosed GetAdaptersAddresses() call has failed");
+			FREE(pAddresses);
+			return boost::asio::ip::address_v6 ();
+		}
+
+		pCurrAddresses = pAddresses;
+		while(pCurrAddresses)
+		{
+			PIP_ADAPTER_UNICAST_ADDRESS firstUnicastAddress = pCurrAddresses->FirstUnicastAddress;
+			pUnicast = pCurrAddresses->FirstUnicastAddress;
+
+			for(int i = 0; pUnicast != nullptr; ++i)
+			{
+				LPSOCKADDR lpAddr = pUnicast->Address.lpSockaddr;
+				sockaddr_in6 *localInterfaceAddress = (sockaddr_in6*) lpAddr;
+				if (IsYggdrasilAddress(localInterfaceAddress->sin6_addr.u.Byte)) {
+					boost::asio::ip::address_v6::bytes_type bytes;
+					memcpy (bytes.data (), &localInterfaceAddress->sin6_addr.u.Byte, 16);
+					FREE(pAddresses);
+					return boost::asio::ip::address_v6 (bytes);
+				}
+				pUnicast = pUnicast->Next;
+			}
+			pCurrAddresses = pCurrAddresses->Next;
+		}
+		LogPrint(eLogWarning, "NetIface: interface with yggdrasil network address not found");
+		FREE(pAddresses);
 		return boost::asio::ip::address_v6 ();
 #else
-		ifaddrs * addrs = nullptr;
+		ifaddrs *addrs, *cur = nullptr;
 		auto err = getifaddrs(&addrs);
 		if (!err)
 		{
-			ifaddrs * cur = addrs;
+			cur = addrs;
 			while(cur)
 			{
 				if (cur->ifa_addr && cur->ifa_addr->sa_family == AF_INET6)
 				{
 					sockaddr_in6* sa = (sockaddr_in6*)cur->ifa_addr;
-					if (sa->sin6_addr.s6_addr[0] == 0x02 || sa->sin6_addr.s6_addr[0] == 0x03)
+					if (IsYggdrasilAddress(sa->sin6_addr.s6_addr))
 					{
 						boost::asio::ip::address_v6::bytes_type bytes;
 						memcpy (bytes.data (), &sa->sin6_addr, 16);
+						freeifaddrs(addrs);
 						return boost::asio::ip::address_v6 (bytes);
 					}
 				}
 				cur = cur->ifa_next;
 			}
 		}
+		LogPrint(eLogWarning, "NetIface: interface with yggdrasil network address not found");
+		if(addrs) freeifaddrs(addrs);
 		return boost::asio::ip::address_v6 ();
 #endif
 	}
 
-	bool IsInReservedRange (const boost::asio::ip::address& host, bool checkYggdrasil) 
+	bool IsLocalAddress (const boost::asio::ip::address& addr)
+	{
+		auto mtu =  // TODO: implement better
+#ifdef _WIN32
+		GetMTUWindows(addr, 0);
+#else
+		GetMTUUnix(addr, 0);
+#endif	
+		return mtu > 0;
+	}	
+	
+	bool IsInReservedRange (const boost::asio::ip::address& host) 
 	{
 		// https://en.wikipedia.org/wiki/Reserved_IP_addresses
+		if (host.is_unspecified ()) return false;
 		if(host.is_v4())
 		{
 			static const std::vector< std::pair<uint32_t, uint32_t> > reservedIPv4Ranges {
@@ -489,7 +563,7 @@ namespace net
 				if (ipv6_address >= it.first && ipv6_address <= it.second)
 					return true;
 			}
-			if (checkYggdrasil && (ipv6_address[0] == 0x02 || ipv6_address[0] == 0x03)) // yggdrasil?
+			if (IsYggdrasilAddress (ipv6_address.data ())) // yggdrasil?
 				return true;
 		}
 		return false;

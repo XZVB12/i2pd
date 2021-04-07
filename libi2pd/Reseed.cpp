@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2020, The PurpleI2P Project
+* Copyright (c) 2013-2021, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -82,10 +82,17 @@ namespace data
 	 */
 	int Reseeder::ReseedFromServers ()
 	{
-		std::string reseedURLs; i2p::config::GetOption("reseed.urls", reseedURLs);
+		bool ipv6;	i2p::config::GetOption("ipv6", ipv6);
+		bool ipv4;	i2p::config::GetOption("ipv4", ipv4);
+		
 		std::vector<std::string> httpsReseedHostList;
-		boost::split(httpsReseedHostList, reseedURLs, boost::is_any_of(","), boost::token_compress_on);
-
+		if (ipv4 || ipv6)
+		{	
+			std::string reseedURLs; i2p::config::GetOption("reseed.urls", reseedURLs);
+			if (!reseedURLs.empty ())
+				boost::split(httpsReseedHostList, reseedURLs, boost::is_any_of(","), boost::token_compress_on);
+		}
+			
 		std::vector<std::string> yggReseedHostList;
 		if (!i2p::util::net::GetYggdrasilAddress ().is_unspecified ())
 		{
@@ -567,9 +574,11 @@ namespace data
 						proxyReq.method = "CONNECT";
 						proxyReq.version = "HTTP/1.1";
 						proxyReq.uri = url.host + ":" + std::to_string(url.port);
+						auto auth = i2p::http::CreateBasicAuthorizationString (proxyUrl.user, proxyUrl.pass);
+						if (!auth.empty ())
+							proxyReq.AddHeader("Proxy-Authorization", auth);
 
 						boost::asio::streambuf writebuf, readbuf;
-
 						std::ostream out(&writebuf);
 						out << proxyReq.to_string();
 

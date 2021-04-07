@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2020, The PurpleI2P Project
+* Copyright (c) 2013-2021, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -83,9 +83,9 @@ namespace data
 			void HandleDeliveryStatusMsg (std::shared_ptr<const I2NPMessage> msg);
 
 			std::shared_ptr<const RouterInfo> GetRandomRouter () const;
-			std::shared_ptr<const RouterInfo> GetRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith) const;
-			std::shared_ptr<const RouterInfo> GetHighBandwidthRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith) const;
-			std::shared_ptr<const RouterInfo> GetRandomPeerTestRouter (bool v4only = true) const;
+			std::shared_ptr<const RouterInfo> GetRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith, bool reverse) const;
+			std::shared_ptr<const RouterInfo> GetHighBandwidthRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith, bool reverse) const;
+			std::shared_ptr<const RouterInfo> GetRandomPeerTestRouter (bool v4) const;
 			std::shared_ptr<const RouterInfo> GetRandomSSUV6Router () const; // TODO: change to v6 peer test later
 			std::shared_ptr<const RouterInfo> GetRandomIntroducer () const;
 			std::shared_ptr<const RouterInfo> GetClosestFloodfill (const IdentHash& destination, const std::set<IdentHash>& excluded, bool closeThanUsOnly = false) const;

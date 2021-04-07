@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2020, The PurpleI2P Project
+* Copyright (c) 2013-2021, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -29,6 +29,10 @@ namespace tunnel
 		m_NumInboundTunnels (numInboundTunnels), m_NumOutboundTunnels (numOutboundTunnels),
 		m_IsActive (true), m_CustomPeerSelector(nullptr)
 	{
+		if (m_NumInboundTunnels > TUNNEL_POOL_MAX_INBOUND_TUNNELS_QUANTITY) 
+			m_NumInboundTunnels = TUNNEL_POOL_MAX_INBOUND_TUNNELS_QUANTITY;
+		if (m_NumOutboundTunnels > TUNNEL_POOL_MAX_OUTBOUND_TUNNELS_QUANTITY) 
+			m_NumOutboundTunnels = TUNNEL_POOL_MAX_OUTBOUND_TUNNELS_QUANTITY;	
 		m_NextManageTime = i2p::util::GetSecondsSinceEpoch () + rand () % TUNNEL_POOL_MANAGE_INTERVAL;
 	}
 
@@ -389,19 +393,20 @@ namespace tunnel
 		}
 	}
 
-	std::shared_ptr<const i2p::data::RouterInfo> TunnelPool::SelectNextHop (std::shared_ptr<const i2p::data::RouterInfo> prevHop) const
+	std::shared_ptr<const i2p::data::RouterInfo> TunnelPool::SelectNextHop (std::shared_ptr<const i2p::data::RouterInfo> prevHop, bool reverse) const
 	{
 		bool isExploratory = (i2p::tunnel::tunnels.GetExploratoryPool () == shared_from_this ());
-		auto hop = isExploratory ? i2p::data::netdb.GetRandomRouter (prevHop):
-			i2p::data::netdb.GetHighBandwidthRandomRouter (prevHop);
+		auto hop = isExploratory ? i2p::data::netdb.GetRandomRouter (prevHop, reverse):
+			i2p::data::netdb.GetHighBandwidthRandomRouter (prevHop, reverse);
 
 		if (!hop || hop->GetProfile ()->IsBad ())
-			hop = i2p::data::netdb.GetRandomRouter (prevHop);
+			hop = i2p::data::netdb.GetRandomRouter (prevHop, reverse);
 		return hop;
 	}
 
 	bool StandardSelectPeers(Path & peers, int numHops, bool inbound, SelectHopFunc nextHop)
 	{
+		int start = 0;
 		auto prevHop = i2p::context.GetSharedRouterInfo ();
 		if(i2p::transport::transports.RoutesRestricted())
 		{
@@ -410,26 +415,41 @@ namespace tunnel
 			if(!hop) return false;
 			peers.push_back(hop->GetRouterIdentity());
 			prevHop = hop;
+			start++;
 		}
-		else if (i2p::transport::transports.GetNumPeers () > 25)
+		else if (i2p::transport::transports.GetNumPeers () > 100 ||
+			(inbound && i2p::transport::transports.GetNumPeers () > 25))
 		{
 			auto r = i2p::transport::transports.GetRandomPeer ();
-			if (r && !r->GetProfile ()->IsBad ())
+			if (r && !r->GetProfile ()->IsBad () && 
+				(numHops > 1 || (!inbound && r->IsV4 ()) || r->IsReachable ())) // first inbound must be reachable
 			{
 				prevHop = r;
 				peers.push_back (r->GetRouterIdentity ());
-				numHops--;
+				start++;
 			}
 		}
 
-		for(int i = 0; i < numHops; i++ )
+		for(int i = start; i < numHops; i++ )
 		{
-			auto hop = nextHop (prevHop);
+			auto hop = nextHop (prevHop, inbound);
+			if (!hop && !i) // if no suitable peer found for first hop, try already connected
+			{	
+				LogPrint (eLogInfo, "Tunnels: Can't select first hop for a tunnel. Trying already connected");
+				hop = i2p::transport::transports.GetRandomPeer ();
+			}	
 			if (!hop)
 			{
 				LogPrint (eLogError, "Tunnels: Can't select next hop for ", prevHop->GetIdentHashBase64 ());
 				return false;
 			}
+			if ((i == numHops - 1) &&
+				((inbound && !hop->IsReachable ()) ||  // IBGW is not reachable
+				(!inbound && !hop->IsV4 ())))	// OBEP is not ipv4
+			{
+				auto hop1 = nextHop (prevHop, true);
+				if (hop1) hop = hop1;
+			}	
 			prevHop = hop;
 			peers.push_back (hop->GetRouterIdentity ());
 		}
@@ -449,7 +469,7 @@ namespace tunnel
 		}
 		// explicit peers in use
 		if (m_ExplicitPeers) return SelectExplicitPeers (peers, isInbound);
-		return StandardSelectPeers(peers, numHops, isInbound, std::bind(&TunnelPool::SelectNextHop, this, std::placeholders::_1));
+		return StandardSelectPeers(peers, numHops, isInbound, std::bind(&TunnelPool::SelectNextHop, this, std::placeholders::_1, std::placeholders::_2));
 	}
 
 	bool TunnelPool::SelectExplicitPeers (std::vector<std::shared_ptr<const i2p::data::IdentityEx> >& peers, bool isInbound)

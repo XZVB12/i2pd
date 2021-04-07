@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2020, The PurpleI2P Project
+* Copyright (c) 2013-2021, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -57,7 +57,9 @@ namespace data
 		uint16_t threshold; i2p::config::GetOption("reseed.threshold", threshold);
 		if (m_RouterInfos.size () < threshold) // reseed if # of router less than threshold
 			Reseed ();
-
+		else if (!GetRandomRouter (i2p::context.GetSharedRouterInfo (), false))
+			Reseed (); // we don't have a router we can connect to. Trying to reseed
+		
 		i2p::config::GetOption("persist.profiles", m_PersistProfiles);
 
 		m_IsRunning = true;
@@ -334,7 +336,7 @@ namespace data
 			if (it == m_LeaseSets.end () || it->second->GetStoreType () != storeType ||
 				leaseSet->GetPublishedTimestamp () > it->second->GetPublishedTimestamp ())
 			{
-				if (leaseSet->IsPublic ())
+				if (leaseSet->IsPublic () && !leaseSet->IsExpired ())
 				{
 					// TODO: implement actual update
 					LogPrint (eLogInfo, "NetDb: LeaseSet2 updated: ", ident.ToBase32());
@@ -343,7 +345,7 @@ namespace data
 				}
 				else
 				{
-					LogPrint (eLogWarning, "NetDb: Unpublished LeaseSet2 received: ", ident.ToBase32());
+					LogPrint (eLogWarning, "NetDb: Unpublished or expired LeaseSet2 received: ", ident.ToBase32());
 					m_LeaseSets.erase (ident);
 				}
 			}
@@ -452,7 +454,7 @@ namespace data
 	{
 		auto r = std::make_shared<RouterInfo>(path);
 		if (r->GetRouterIdentity () && !r->IsUnreachable () &&
-				(!r->UsesIntroducer () || m_LastLoad < r->GetTimestamp () + NETDB_INTRODUCEE_EXPIRATION_TIMEOUT*1000LL)) // 1 hour
+				(!r->HasUnreachableCap () || m_LastLoad < r->GetTimestamp () + NETDB_INTRODUCEE_EXPIRATION_TIMEOUT*1000LL)) // 1 hour
 		{
 			r->DeleteBuffer ();
 			r->ClearProperties (); // properties are not used for regular routers
@@ -582,7 +584,7 @@ namespace data
 			if (it.second->IsUnreachable () && total - deletedCount < NETDB_MIN_ROUTERS)	
 				it.second->SetUnreachable (false); 
 			// find & mark expired routers
-			if (it.second->UsesIntroducer ())
+			if (it.second->HasUnreachableCap ())
 			{
 				if (ts > it.second->GetTimestamp () + NETDB_INTRODUCEE_EXPIRATION_TIMEOUT*1000LL)
 				// RouterInfo expires after 1 hour if uses introducer
@@ -643,6 +645,9 @@ namespace data
 		auto floodfill = GetClosestFloodfill (destination, dest->GetExcludedPeers ());
 		if (floodfill)
 		{
+			if (direct && !floodfill->IsReachableFrom (i2p::context.GetRouterInfo ()) &&
+			    !i2p::transport::transports.IsConnected (floodfill->GetIdentHash ())) 
+				direct = false; // floodfill can't be reached directly
 			if (direct)
 				transports.SendMessage (floodfill->GetIdentHash (), dest->CreateRequestMessage (floodfill->GetIdentHash ()));
 			else
@@ -1087,7 +1092,20 @@ namespace data
 			LogPrint (eLogInfo, "NetDb: Publishing our RouterInfo to ", i2p::data::GetIdentHashAbbreviation(floodfill->GetIdentHash ()), ". reply token=", replyToken);
 			m_PublishExcluded.insert (floodfill->GetIdentHash ());
 			m_PublishReplyToken = replyToken;
-			transports.SendMessage (floodfill->GetIdentHash (), CreateDatabaseStoreMsg (i2p::context.GetSharedRouterInfo (), replyToken));
+			if (floodfill->IsReachableFrom (i2p::context.GetRouterInfo ()) || // are we able to connect?
+			    i2p::transport::transports.IsConnected (floodfill->GetIdentHash ()))  // already connected ?    
+				// send directly
+				transports.SendMessage (floodfill->GetIdentHash (), CreateDatabaseStoreMsg (i2p::context.GetSharedRouterInfo (), replyToken));
+			else
+			{
+				// otherwise through exploratory	
+				auto exploratoryPool = i2p::tunnel::tunnels.GetExploratoryPool ();
+				auto outbound = exploratoryPool ? exploratoryPool->GetNextOutboundTunnel () : nullptr;
+				auto inbound = exploratoryPool ? exploratoryPool->GetNextInboundTunnel () : nullptr;	
+				if (inbound && outbound)
+					outbound->SendTunnelDataMsg (floodfill->GetIdentHash (), 0, 
+						CreateDatabaseStoreMsg (i2p::context.GetSharedRouterInfo (), replyToken, inbound));	
+			}		
 		}
 	}
 
@@ -1120,22 +1138,23 @@ namespace data
 			});
 	}
 
-	std::shared_ptr<const RouterInfo> NetDb::GetRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith) const
+	std::shared_ptr<const RouterInfo> NetDb::GetRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith, bool reverse) const
 	{
 		return GetRandomRouter (
-			[compatibleWith](std::shared_ptr<const RouterInfo> router)->bool
+			[compatibleWith, reverse](std::shared_ptr<const RouterInfo> router)->bool
 			{
 				return !router->IsHidden () && router != compatibleWith &&
-					router->IsCompatible (*compatibleWith);
+					(reverse ? compatibleWith->IsReachableFrom (*router) :
+						router->IsReachableFrom (*compatibleWith));
 			});
 	}
 
-	std::shared_ptr<const RouterInfo> NetDb::GetRandomPeerTestRouter (bool v4only) const
+	std::shared_ptr<const RouterInfo> NetDb::GetRandomPeerTestRouter (bool v4) const
 	{
 		return GetRandomRouter (
-			[v4only](std::shared_ptr<const RouterInfo> router)->bool
+			[v4](std::shared_ptr<const RouterInfo> router)->bool
 			{
-				return !router->IsHidden () && router->IsPeerTesting () && router->IsSSU (v4only);
+				return !router->IsHidden () && router->IsPeerTesting (v4);
 			});
 	}
 
@@ -1153,17 +1172,18 @@ namespace data
 		return GetRandomRouter (
 			[](std::shared_ptr<const RouterInfo> router)->bool
 			{
-				return !router->IsHidden () && router->IsIntroducer ();
+				return router->IsIntroducer (true) && !router->IsHidden () && !router->IsFloodfill (); // floodfills don't send relay tag
 			});
 	}
 
-	std::shared_ptr<const RouterInfo> NetDb::GetHighBandwidthRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith) const
+	std::shared_ptr<const RouterInfo> NetDb::GetHighBandwidthRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith, bool reverse) const
 	{
 		return GetRandomRouter (
-			[compatibleWith](std::shared_ptr<const RouterInfo> router)->bool
+			[compatibleWith, reverse](std::shared_ptr<const RouterInfo> router)->bool
 			{
 				return !router->IsHidden () && router != compatibleWith &&
-					router->IsCompatible (*compatibleWith) &&
+					(reverse ? compatibleWith->IsReachableFrom (*router) :
+						router->IsReachableFrom (*compatibleWith)) &&
 					(router->GetCaps () & RouterInfo::eHighBandwidth) &&
 					router->GetVersion () >= NETDB_MIN_HIGHBANDWIDTH_VERSION;
 			});
